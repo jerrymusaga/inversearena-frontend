@@ -12,6 +12,11 @@ const EXECUTE_AFTER_KEY: Symbol = symbol_short!("P_AFTER");
 const WHITELIST_PREFIX: Symbol = symbol_short!("WL");
 const MIN_STAKE_KEY: Symbol = symbol_short!("MIN_STK");
 const ARENA_WASM_HASH_KEY: Symbol = symbol_short!("AR_WASM");
+const POOL_PREFIX: Symbol = symbol_short!("POOL");
+
+// ── Capacity limits ───────────────────────────────────────────────────────────
+
+const MAX_POOL_CAPACITY: u32 = 256;
 
 // ── Timelock constant: 48 hours in seconds ────────────────────────────────────
 
@@ -169,9 +174,17 @@ impl FactoryContract {
     }
 
     /// Create a new pool (arena). Only admin or whitelisted hosts can call this.
-    /// The caller must provide a valid stake amount >= minimum stake.
-    /// Emits `PoolCreated(creator, stake_amount)`.
-    pub fn create_pool(env: Env, caller: Address, creator: Address, stake_amount: i128) {
+    /// The caller must provide a valid stake amount >= minimum stake and a
+    /// capacity in range [1, MAX_POOL_CAPACITY]. pool_id must be unique.
+    /// Emits `PoolCreated(pool_id, creator, capacity, stake_amount)`.
+    pub fn create_pool(
+        env: Env,
+        caller: Address,
+        creator: Address,
+        pool_id: u32,
+        capacity: u32,
+        stake_amount: i128,
+    ) {
         let admin: Address = env
             .storage()
             .instance()
@@ -185,7 +198,24 @@ impl FactoryContract {
             panic!("caller is not authorized to create pools");
         }
 
+        let pool_key = (POOL_PREFIX, pool_id);
+        if env.storage().instance().has(&pool_key) {
+            panic!("pool with this id already exists");
+        }
+
+        if capacity == 0 {
+            panic!("capacity must be at least 1");
+        }
+
+        if capacity > MAX_POOL_CAPACITY {
+            panic!("capacity exceeds maximum allowed value");
+        }
+
         let min_stake = Self::get_min_stake(env.clone());
+        if stake_amount <= 0 {
+            panic!("stake amount must be positive");
+        }
+
         if stake_amount < min_stake {
             panic!(
                 "stake amount {} is below minimum {}",
@@ -193,16 +223,14 @@ impl FactoryContract {
             );
         }
 
-        if stake_amount <= 0 {
-            panic!("stake amount must be positive");
-        }
-
         if !env.storage().instance().has(&ARENA_WASM_HASH_KEY) {
             panic!("arena WASM hash not set, call set_arena_wasm_hash first");
         }
 
+        env.storage().instance().set(&pool_key, &true);
+
         env.events()
-            .publish((TOPIC_POOL_CREATED,), (creator, stake_amount));
+            .publish((TOPIC_POOL_CREATED,), (pool_id, creator, capacity, stake_amount));
     }
 
     // ── Upgrade mechanism ────────────────────────────────────────────────────

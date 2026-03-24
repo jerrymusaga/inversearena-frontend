@@ -7,6 +7,7 @@ use soroban_sdk::{
 
 const TIMELOCK: u64 = 48 * 60 * 60; // 48 hours
 const MIN_STAKE: i128 = 10_000_000; // 10 XLM in stroops
+const MAX_CAPACITY: u32 = 256;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -107,7 +108,7 @@ fn test_admin_can_create_pool() {
     client.set_arena_wasm_hash(&wasm_hash);
     let creator = Address::generate(&env);
     let stake = MIN_STAKE + 1_000_000;
-    client.create_pool(&admin, &creator, &stake);
+    client.create_pool(&admin, &creator, &1u32, &8u32, &stake);
 }
 
 #[test]
@@ -120,7 +121,7 @@ fn test_whitelisted_host_can_create_pool() {
     client.set_arena_wasm_hash(&wasm_hash);
     let creator = Address::generate(&env);
     let stake = MIN_STAKE + 1_000_000;
-    client.create_pool(&host, &creator, &stake);
+    client.create_pool(&host, &creator, &1u32, &8u32, &stake);
 }
 
 #[test]
@@ -132,7 +133,7 @@ fn test_unauthorized_caller_cannot_create_pool() {
     let unauthorized = Address::generate(&env);
     let creator = Address::generate(&env);
     let stake = MIN_STAKE + 1_000_000;
-    client.create_pool(&unauthorized, &creator, &stake);
+    client.create_pool(&unauthorized, &creator, &1u32, &8u32, &stake);
 }
 
 // ── create_pool stake validation ────────────────────────────────────────────────
@@ -143,7 +144,7 @@ fn test_create_pool_with_stake_equal_to_minimum_succeeds() {
     let wasm_hash = dummy_hash(&env);
     client.set_arena_wasm_hash(&wasm_hash);
     let creator = Address::generate(&env);
-    client.create_pool(&admin, &creator, &MIN_STAKE);
+    client.create_pool(&admin, &creator, &1u32, &8u32, &MIN_STAKE);
 }
 
 #[test]
@@ -154,7 +155,7 @@ fn test_create_pool_with_stake_below_minimum_panics() {
     client.set_arena_wasm_hash(&wasm_hash);
     let creator = Address::generate(&env);
     let stake = MIN_STAKE - 1;
-    client.create_pool(&admin, &creator, &stake);
+    client.create_pool(&admin, &creator, &1u32, &8u32, &stake);
 }
 
 #[test]
@@ -164,7 +165,7 @@ fn test_create_pool_with_zero_stake_panics() {
     let wasm_hash = dummy_hash(&env);
     client.set_arena_wasm_hash(&wasm_hash);
     let creator = Address::generate(&env);
-    client.create_pool(&admin, &creator, &0);
+    client.create_pool(&admin, &creator, &1u32, &8u32, &0);
 }
 
 #[test]
@@ -174,7 +175,7 @@ fn test_create_pool_with_negative_stake_panics() {
     let wasm_hash = dummy_hash(&env);
     client.set_arena_wasm_hash(&wasm_hash);
     let creator = Address::generate(&env);
-    client.create_pool(&admin, &creator, &-1000);
+    client.create_pool(&admin, &creator, &1u32, &8u32, &-1000);
 }
 
 #[test]
@@ -183,7 +184,65 @@ fn test_create_pool_without_wasm_hash_panics() {
     let (env, admin, client) = setup();
     let creator = Address::generate(&env);
     let stake = MIN_STAKE + 1_000_000;
-    client.create_pool(&admin, &creator, &stake);
+    client.create_pool(&admin, &creator, &1u32, &8u32, &stake);
+}
+
+// ── create_pool capacity validation ───────────────────────────────────────────
+
+#[test]
+fn test_create_pool_with_capacity_one_succeeds() {
+    let (env, admin, client) = setup();
+    client.set_arena_wasm_hash(&dummy_hash(&env));
+    let creator = Address::generate(&env);
+    client.create_pool(&admin, &creator, &1u32, &1u32, &MIN_STAKE);
+}
+
+#[test]
+fn test_create_pool_with_max_capacity_succeeds() {
+    let (env, admin, client) = setup();
+    client.set_arena_wasm_hash(&dummy_hash(&env));
+    let creator = Address::generate(&env);
+    client.create_pool(&admin, &creator, &1u32, &MAX_CAPACITY, &MIN_STAKE);
+}
+
+#[test]
+#[should_panic(expected = "capacity must be at least 1")]
+fn test_create_pool_with_zero_capacity_panics() {
+    let (env, admin, client) = setup();
+    client.set_arena_wasm_hash(&dummy_hash(&env));
+    let creator = Address::generate(&env);
+    client.create_pool(&admin, &creator, &1u32, &0u32, &MIN_STAKE);
+}
+
+#[test]
+#[should_panic(expected = "capacity exceeds maximum allowed value")]
+fn test_create_pool_exceeding_max_capacity_panics() {
+    let (env, admin, client) = setup();
+    client.set_arena_wasm_hash(&dummy_hash(&env));
+    let creator = Address::generate(&env);
+    client.create_pool(&admin, &creator, &1u32, &(MAX_CAPACITY + 1), &MIN_STAKE);
+}
+
+// ── create_pool duplicate rejection ───────────────────────────────────────────
+
+#[test]
+fn test_create_pool_with_different_ids_succeeds() {
+    let (env, admin, client) = setup();
+    client.set_arena_wasm_hash(&dummy_hash(&env));
+    let creator = Address::generate(&env);
+    client.create_pool(&admin, &creator, &1u32, &8u32, &MIN_STAKE);
+    client.create_pool(&admin, &creator, &2u32, &8u32, &MIN_STAKE);
+}
+
+#[test]
+#[should_panic(expected = "pool with this id already exists")]
+fn test_create_pool_duplicate_id_panics() {
+    let (env, admin, client) = setup();
+    client.set_arena_wasm_hash(&dummy_hash(&env));
+    let creator = Address::generate(&env);
+    client.create_pool(&admin, &creator, &42u32, &8u32, &MIN_STAKE);
+    // Second call with the same pool_id must be rejected.
+    client.create_pool(&admin, &creator, &42u32, &8u32, &MIN_STAKE);
 }
 
 // ── propose_upgrade ───────────────────────────────────────────────────────────
