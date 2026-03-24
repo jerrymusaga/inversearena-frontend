@@ -1154,7 +1154,7 @@ fn claim_reverts_for_non_winner() {
 
     env.mock_all_auths();
     let res = client.try_claim(&non_winner);
-    assert_eq!(res, Err(Ok(ArenaError::NothingToClaim)));
+    assert_eq!(res, Err(Ok(ArenaError::NoPrizeToClaim)));
 }
 
 #[test]
@@ -1179,6 +1179,8 @@ fn double_claim_reverts() {
     // Second claim reverts
     let res = client.try_claim(&player);
     assert_eq!(res, Err(Ok(ArenaError::AlreadyClaimed)));
+}
+
 // ── Pause mechanism tests ───────────────────────────────────────────────────
 
 #[test]
