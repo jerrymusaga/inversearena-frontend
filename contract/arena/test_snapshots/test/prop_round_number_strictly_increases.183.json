@@ -37,7 +37,7 @@
   ],
   "ledger": {
     "protocol_version": 22,
-    "sequence_number": 1405,
+    "sequence_number": 1657,
     "timestamp": 1700000000,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
@@ -81,7 +81,7 @@
                         "symbol": "round_speed_in_ledgers"
                       },
                       "val": {
-                        "u32": 27
+                        "u32": 45
                       }
                     }
                   ]
@@ -145,7 +145,7 @@
                         "symbol": "round_deadline_ledger"
                       },
                       "val": {
-                        "u32": 1404
+                        "u32": 1656
                       }
                     },
                     {
@@ -161,7 +161,7 @@
                         "symbol": "round_start_ledger"
                       },
                       "val": {
-                        "u32": 1377
+                        "u32": 1611
                       }
                     },
                     {
@@ -244,36 +244,5 @@
       ]
     ]
   },
-  "events": [
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "R_TOUT"
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "u32": 14
-                },
-                {
-                  "u32": 0
-                },
-                {
-                  "bool": true
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    }
-  ]
+  "events": []
 }

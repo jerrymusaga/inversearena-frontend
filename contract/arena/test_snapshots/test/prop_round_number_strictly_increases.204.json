@@ -13,11 +13,13 @@
     [],
     [],
     [],
+    [],
+    [],
     []
   ],
   "ledger": {
     "protocol_version": 22,
-    "sequence_number": 1087,
+    "sequence_number": 1174,
     "timestamp": 1700000000,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
@@ -61,7 +63,7 @@
                         "symbol": "round_speed_in_ledgers"
                       },
                       "val": {
-                        "u32": 20
+                        "u32": 33
                       }
                     }
                   ]
@@ -125,7 +127,7 @@
                         "symbol": "round_deadline_ledger"
                       },
                       "val": {
-                        "u32": 1086
+                        "u32": 1173
                       }
                     },
                     {
@@ -133,7 +135,7 @@
                         "symbol": "round_number"
                       },
                       "val": {
-                        "u32": 4
+                        "u32": 5
                       }
                     },
                     {
@@ -141,7 +143,7 @@
                         "symbol": "round_start_ledger"
                       },
                       "val": {
-                        "u32": 1066
+                        "u32": 1140
                       }
                     },
                     {
@@ -224,36 +226,5 @@
       ]
     ]
   },
-  "events": [
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "R_TOUT"
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "u32": 4
-                },
-                {
-                  "u32": 0
-                },
-                {
-                  "bool": true
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    }
-  ]
+  "events": []
 }

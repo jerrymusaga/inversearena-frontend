@@ -31,11 +31,23 @@
     [],
     [],
     [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
     []
   ],
   "ledger": {
     "protocol_version": 22,
-    "sequence_number": 1636,
+    "sequence_number": 1322,
     "timestamp": 1700000000,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
@@ -79,7 +91,7 @@
                         "symbol": "round_speed_in_ledgers"
                       },
                       "val": {
-                        "u32": 47
+                        "u32": 15
                       }
                     }
                   ]
@@ -143,7 +155,7 @@
                         "symbol": "round_deadline_ledger"
                       },
                       "val": {
-                        "u32": 1635
+                        "u32": 1321
                       }
                     },
                     {
@@ -151,7 +163,7 @@
                         "symbol": "round_number"
                       },
                       "val": {
-                        "u32": 13
+                        "u32": 19
                       }
                     },
                     {
@@ -159,7 +171,7 @@
                         "symbol": "round_start_ledger"
                       },
                       "val": {
-                        "u32": 1588
+                        "u32": 1306
                       }
                     },
                     {
@@ -242,36 +254,5 @@
       ]
     ]
   },
-  "events": [
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "R_TOUT"
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "u32": 13
-                },
-                {
-                  "u32": 0
-                },
-                {
-                  "bool": true
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    }
-  ]
+  "events": []
 }
