@@ -261,6 +261,7 @@ impl ArenaContract {
 
     pub fn join(env: Env, player: Address, amount: i128) -> Result<(), ArenaError> {
         player.require_auth();
+        require_not_paused(&env)?;
         if amount <= 0 {
             return Err(ArenaError::InvalidAmount);
         }
