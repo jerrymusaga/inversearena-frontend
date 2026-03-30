@@ -375,9 +375,6 @@ impl FactoryContract {
             capacity,
             stake_amount: stake,
         };
-        env.storage()
-            .persistent()
-            .set(&DataKey::Pool(pool_id), &metadata);
 
         // ── Deployment ──────────────────────────────────────────────────────────
 
@@ -443,6 +440,11 @@ impl FactoryContract {
             &soroban_sdk::Symbol::new(&env, "set_admin"),
             soroban_sdk::vec![&env, caller.into_val(&env)],
         );
+
+        // Persist metadata only after deployment and all init calls succeed.
+        env.storage()
+            .persistent()
+            .set(&DataKey::Pool(pool_id), &metadata);
 
         // Increment the pool counter.
         env.storage()

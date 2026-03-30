@@ -20,6 +20,7 @@ const TOKEN_KEY: Symbol = symbol_short!("TOKEN");
 const PRIZE_POOL_KEY: Symbol = symbol_short!("PRIZE_P");
 const GAME_STATUS_KEY: Symbol = symbol_short!("G_STATUS");
 const GAME_FINISHED_KEY: Symbol = symbol_short!("G_FIN");
+const WINNER_SET_KEY: Symbol = symbol_short!("W_SET");
 
 // ── Timelock: 48 hours in seconds ─────────────────────────────────────────────
 const TIMELOCK_PERIOD: u64 = 48 * 60 * 60;
@@ -78,6 +79,8 @@ pub enum ArenaError {
     GameNotFinished = 27,
     TokenConfigurationLocked = 28,
     UpgradeAlreadyPending = 29,
+    WinnerAlreadySet = 30,
+    WinnerNotSet = 31,
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -241,14 +244,14 @@ impl ArenaContract {
         let admin = Self::admin(env.clone());
         admin.require_auth();
         env.storage().instance().set(&PAUSED_KEY, &true);
-        env.events().publish((TOPIC_PAUSED,), ());
+        env.events().publish((TOPIC_PAUSED,), (EVENT_VERSION,));
     }
 
     pub fn unpause(env: Env) {
         let admin = Self::admin(env.clone());
         admin.require_auth();
         env.storage().instance().set(&PAUSED_KEY, &false);
-        env.events().publish((TOPIC_UNPAUSED,), ());
+        env.events().publish((TOPIC_UNPAUSED,), (EVENT_VERSION,));
     }
 
     pub fn is_paused(env: Env) -> bool {
@@ -304,6 +307,14 @@ impl ArenaContract {
         require_not_paused(&env)?;
         let admin = Self::admin(env.clone());
         admin.require_auth();
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&WINNER_SET_KEY)
+            .unwrap_or(false)
+        {
+            return Err(ArenaError::WinnerAlreadySet);
+        }
         if stake < 0 || yield_comp < 0 {
             return Err(ArenaError::InvalidAmount);
         }
@@ -312,6 +323,7 @@ impl ArenaContract {
             .ok_or(ArenaError::InvalidAmount)?;
         storage(&env).set(&DataKey::Winner(player.clone()), &());
         bump(&env, &DataKey::Winner(player.clone()));
+        env.storage().instance().set(&WINNER_SET_KEY, &true);
         let existing_pool: i128 = env
             .storage()
             .instance()
@@ -321,7 +333,7 @@ impl ArenaContract {
             .instance()
             .set(&PRIZE_POOL_KEY, &(existing_pool + prize));
         env.events()
-            .publish((TOPIC_WINNER_SET,), (player, stake, yield_comp));
+            .publish((TOPIC_WINNER_SET,), (player, stake, yield_comp, EVENT_VERSION));
         Ok(())
     }
 
@@ -715,11 +727,24 @@ impl ArenaContract {
         {
             return Err(ArenaError::GameNotFinished);
         }
-        // Verify caller is the address designated by set_winner(); any other
-        // survivor could otherwise pass require_auth() with their own address
-        // and drain the prize pool.
+        // Primary claim path uses an explicit admin-designated winner. If no
+        // winner has been set, allow a fallback only when exactly one survivor
+        // remains and the caller is that survivor.
         if !storage(&env).has(&DataKey::Winner(winner.clone())) {
-            return Err(ArenaError::NotASurvivor);
+            let survivor_count: u32 = env
+                .storage()
+                .instance()
+                .get(&SURVIVOR_COUNT_KEY)
+                .unwrap_or(0u32);
+            if survivor_count == 1 && storage(&env).has(&DataKey::Survivor(winner.clone())) {
+                storage(&env).set(&DataKey::Winner(winner.clone()), &());
+                bump(&env, &DataKey::Winner(winner.clone()));
+                env.storage().instance().set(&WINNER_SET_KEY, &true);
+            } else if survivor_count == 1 {
+                return Err(ArenaError::NotASurvivor);
+            } else {
+                return Err(ArenaError::WinnerNotSet);
+            }
         }
         if env
             .storage()
@@ -840,8 +865,10 @@ impl ArenaContract {
         env.storage()
             .instance()
             .set(&EXECUTE_AFTER_KEY, &execute_after);
-        env.events()
-            .publish((TOPIC_UPGRADE_PROPOSED,), (new_wasm_hash, execute_after));
+        env.events().publish(
+            (TOPIC_UPGRADE_PROPOSED,),
+            (EVENT_VERSION, new_wasm_hash, execute_after),
+        );
         Ok(())
     }
 
@@ -867,8 +894,10 @@ impl ArenaContract {
             .ok_or(ArenaError::NoPendingUpgrade)?;
         env.storage().instance().remove(&PENDING_HASH_KEY);
         env.storage().instance().remove(&EXECUTE_AFTER_KEY);
-        env.events()
-            .publish((TOPIC_UPGRADE_EXECUTED,), new_wasm_hash.clone());
+        env.events().publish(
+            (TOPIC_UPGRADE_EXECUTED,),
+            (EVENT_VERSION, new_wasm_hash.clone()),
+        );
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
@@ -885,7 +914,8 @@ impl ArenaContract {
         }
         env.storage().instance().remove(&PENDING_HASH_KEY);
         env.storage().instance().remove(&EXECUTE_AFTER_KEY);
-        env.events().publish((TOPIC_UPGRADE_CANCELLED,), ());
+        env.events()
+            .publish((TOPIC_UPGRADE_CANCELLED,), (EVENT_VERSION,));
         Ok(())
     }
 

@@ -387,6 +387,20 @@ fn test_create_pool_two_pools_have_independent_state() {
     assert_eq!(arena2.admin(), admin);
 }
 
+#[test]
+fn create_pool_metadata_not_visible_before_full_init() {
+    let (env, admin, client) = setup();
+    client.set_arena_wasm_hash(&dummy_hash(&env));
+    let currency = supported_currency(&env, &client);
+
+    // round_speed = 0 makes arena.init fail; metadata must not become visible.
+    let result = client.try_create_pool(&admin, &MIN_STAKE, &currency, &0u32, &8u32);
+    assert!(result.is_err());
+
+    assert!(client.get_arena(&0u32).is_none());
+    assert_eq!(client.get_arenas(&0u32, &10u32).len(), 0);
+}
+
 // ── propose_upgrade ───────────────────────────────────────────────────────────
 
 #[test]

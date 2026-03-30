@@ -1895,17 +1895,27 @@ fn claim_rejects_before_game_is_finished() {
 }
 
 #[test]
-fn claim_second_set_winner_adds_to_prize_pool() {
-    let (env, _admin, client, token_id, winner) = setup_finished_game_with_winner(0i128);
-    // Pool starts with 300 (3 players × 100) + 0 (prize_amount) = 300.
-    // set_winner now adds to existing pool instead of overwriting.
-    let asset = StellarAssetClient::new(&env, &token_id);
-    asset.mint(&client.address, &700i128); // total contract balance = 300 + 700 = 1000
-    client.set_winner(&winner, &200i128, &100i128); // pool = 300 + 300 = 600
-    client.set_winner(&winner, &150i128, &50i128); // pool = 600 + 200 = 800
+fn claim_second_set_winner_overwrites_prize_pool() {
+    let (_env, _admin, client, _token_id, winner) = setup_finished_game_with_winner(0i128);
 
+    let err = client.try_set_winner(&winner, &200i128, &100i128);
+    assert_eq!(err, Err(Ok(ArenaError::WinnerAlreadySet)));
+
+    // Original pool remains claimable by the original winner.
     let claimed = client.claim(&winner);
-    assert_eq!(claimed, 800i128);
+    assert_eq!(claimed, 300i128);
+}
+
+#[test]
+fn set_winner_twice_returns_error() {
+    let (env, _admin, client, _token_id, winner) = setup_finished_game_with_winner(0i128);
+    let second = Address::generate(&env);
+
+    let err = client.try_set_winner(&second, &50i128, &25i128);
+    assert_eq!(err, Err(Ok(ArenaError::WinnerAlreadySet)));
+
+    let prize = client.claim(&winner);
+    assert_eq!(prize, 300i128);
 }
 
 #[test]
@@ -2217,6 +2227,51 @@ fn timeout_round_event_reflects_timed_out_state() {
     assert_eq!(timed_out.round_number, 1);
 }
 
+#[test]
+fn pause_unpause_emit_versioned_payloads() {
+    use soroban_sdk::testutils::Events as _;
+
+    let (env, _admin, client) = setup_with_admin();
+
+    client.pause();
+    let pause_event = env.events().all().last().unwrap();
+    let (_contract, pause_topics, pause_data) = pause_event;
+    let pause_topic: Symbol = pause_topics.get(0).unwrap().into_val(&env);
+    let pause_payload: (u32,) = pause_data.into_val(&env);
+    assert_eq!(pause_topic, symbol_short!("PAUSED"));
+    assert_eq!(pause_payload, (1u32,));
+
+    client.unpause();
+    let unpause_event = env.events().all().last().unwrap();
+    let (_contract, unpause_topics, unpause_data) = unpause_event;
+    let unpause_topic: Symbol = unpause_topics.get(0).unwrap().into_val(&env);
+    let unpause_payload: (u32,) = unpause_data.into_val(&env);
+    assert_eq!(unpause_topic, symbol_short!("UNPAUSED"));
+    assert_eq!(unpause_payload, (1u32,));
+}
+
+#[test]
+fn set_winner_event_includes_version_field() {
+    use soroban_sdk::testutils::Events as _;
+
+    let (env, admin, client) = setup_with_admin();
+    let (_asset, token_id) = setup_token(&env, &admin);
+    client.set_token(&token_id);
+    client.init(&5, &TEST_REQUIRED_STAKE);
+
+    let winner = Address::generate(&env);
+    client.set_winner(&winner, &100i128, &10i128);
+
+    let winner_event = env.events().all().last().unwrap();
+    let (_contract, topics, data) = winner_event;
+    let topic: Symbol = topics.get(0).unwrap().into_val(&env);
+    let payload: (Address, i128, i128, u32) = data.into_val(&env);
+
+    assert_eq!(topic, symbol_short!("WIN_SET"));
+    assert_eq!(payload.0, winner);
+    assert_eq!(payload.3, 1u32);
+}
+
 // ── Issue #358: claim() must verify caller is the designated winner ────────────
 
 #[test]
@@ -2245,6 +2300,22 @@ fn claim_succeeds_only_for_designated_winner() {
 #[test]
 fn claim_fails_without_any_winner_set() {
     let (env, _admin, client, _token_id, players) = setup_game(5, 3);
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&GAME_FINISHED_KEY, &true);
+    });
+
+    // set_winner() never called and multiple survivors remain.
+    let result = client.try_claim(&players[0]);
+    assert_eq!(
+        result,
+        Err(Ok(ArenaError::WinnerNotSet)),
+        "claim must fail when no winner has been designated"
+    );
+}
+
+#[test]
+fn last_survivor_can_claim_after_resolve_round() {
+    let (env, _admin, client, _token_id, players) = setup_game(5, 3);
     set_ledger_sequence(&env, 1);
     client.start_round();
     client.submit_choice(&players[0], &1u32, &Choice::Heads);
@@ -2252,13 +2323,24 @@ fn claim_fails_without_any_winner_set() {
     client.submit_choice(&players[2], &1u32, &Choice::Tails);
     set_ledger_sequence(&env, 7);
     client.resolve_round();
-    // set_winner() never called — DataKey::Winner is absent for everyone.
+
+    // No explicit set_winner() call; sole survivor can still claim.
+    let prize = client.claim(&players[0]);
+    assert_eq!(prize, 300i128);
+
+    let user_state = client.get_user_state(&players[0]);
+    assert!(user_state.has_won);
+}
+
+#[test]
+fn claim_fails_gracefully_when_game_finished_but_winner_not_set() {
+    let (env, _admin, client, _token_id, players) = setup_game(5, 3);
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&GAME_FINISHED_KEY, &true);
+    });
+
     let result = client.try_claim(&players[0]);
-    assert_eq!(
-        result,
-        Err(Ok(ArenaError::NotASurvivor)),
-        "claim must fail when no winner has been designated"
-    );
+    assert_eq!(result, Err(Ok(ArenaError::WinnerNotSet)));
 }
 
 // ── Issue #227: minority-wins resolution algorithm unit tests ─────────────────
