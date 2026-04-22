@@ -21,6 +21,11 @@ const PRIZE_POOL_KEY: Symbol = symbol_short!("PRIZE_P");
 const GAME_STATUS_KEY: Symbol = symbol_short!("G_STATUS");
 const GAME_FINISHED_KEY: Symbol = symbol_short!("G_FIN");
 const WINNER_SET_KEY: Symbol = symbol_short!("W_SET");
+const STATE_KEY: Symbol = symbol_short!("STATE");
+const HOST_KEY: Symbol = symbol_short!("HOST");
+const START_DEADLINE_KEY: Symbol = symbol_short!("S_DEAD");
+const PLAYERS_KEY: Symbol = symbol_short!("PLAYERS");
+const ARENA_ID_KEY: Symbol = symbol_short!("A_ID");
 
 // ── Timelock: 48 hours in seconds ─────────────────────────────────────────────
 const TIMELOCK_PERIOD: u64 = 48 * 60 * 60;
@@ -41,6 +46,8 @@ const TOPIC_ROUND_RESOLVED: Symbol = symbol_short!("RSLVD");
 const TOPIC_WINNER_SET: Symbol = symbol_short!("WIN_SET");
 const TOPIC_CLAIM: Symbol = symbol_short!("CLAIM");
 const TOPIC_LEAVE: Symbol = symbol_short!("LEAVE");
+const TOPIC_CANCELLED: Symbol = symbol_short!("CANCEL");
+const TOPIC_STATE_CHANGED: Symbol = symbol_short!("ST_CHG");
 
 const EVENT_VERSION: u32 = 1;
 
@@ -121,11 +128,44 @@ pub struct ArenaStateView {
     pub potential_payout: i128,
 }
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UserStateView {
     pub is_active: bool,
     pub has_won: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArenaState {
+    Pending,
+    Active,
+    Completed,
+    Cancelled,
+}
+
+#[contracttype]
+pub struct RefundKey {
+    pub arena_id: u64,
+    pub player: Address,
+}
+
+#[contracttype]
+pub struct ArenaCancelled {
+    pub arena_id: u64,
+    pub cancelled_by: Address,
+}
+
+#[contracttype]
+pub struct ArenaStateChanged {
+    pub old_state: ArenaState,
+    pub new_state: ArenaState,
+}
+
+macro_rules! assert_state {
+    ($current:expr, $expected:pat) => {
+        match $current {
+            $expected => {},
+            _ => panic!("Invalid state transition"),
+        }
+    };
 }
 
 #[contracttype]
@@ -152,6 +192,8 @@ enum DataKey {
     Eliminated(Address),
     PrizeClaimed(Address),
     Winner(Address),
+    State,
+    Refunded(Address),
 }
 
 
@@ -164,8 +206,11 @@ pub struct ArenaContract;
 impl ArenaContract {
     pub fn init(
         env: Env,
+        arena_id: u64,
+        host: Address,
         round_speed_in_ledgers: u32,
         required_stake_amount: i128,
+        start_deadline: u64,
     ) -> Result<(), ArenaError> {
         if storage(&env).has(&DataKey::Config) {
             return Err(ArenaError::AlreadyInitialized);
@@ -200,6 +245,12 @@ impl ArenaContract {
             },
         );
         bump(&env, &DataKey::Round);
+        
+        env.storage().instance().set(&ARENA_ID_KEY, &arena_id);
+        env.storage().instance().set(&HOST_KEY, &host);
+        env.storage().instance().set(&START_DEADLINE_KEY, &start_deadline);
+        env.storage().instance().set(&PLAYERS_KEY, &Vec::<Address>::new(&env));
+        set_state(&env, ArenaState::Pending);
         Ok(())
     }
 
@@ -389,6 +440,11 @@ impl ArenaContract {
         env.storage()
             .instance()
             .set(&SURVIVOR_COUNT_KEY, &(count + 1));
+            
+        let mut players: Vec<Address> = env.storage().instance().get(&PLAYERS_KEY).unwrap_or(Vec::new(&env));
+        players.push_back(player.clone());
+        env.storage().instance().set(&PLAYERS_KEY, &players);
+
         let pool: i128 = env
             .storage()
             .instance()
@@ -434,6 +490,13 @@ impl ArenaContract {
         env.storage()
             .instance()
             .set(&SURVIVOR_COUNT_KEY, &count.saturating_sub(1));
+            
+        let mut players: Vec<Address> = env.storage().instance().get(&PLAYERS_KEY).unwrap_or(Vec::new(&env));
+        if let Some(i) = players.first_index_of(player.clone()) {
+            players.remove(i);
+        }
+        env.storage().instance().set(&PLAYERS_KEY, &players);
+
         let pool: i128 = env
             .storage()
             .instance()
@@ -449,6 +512,10 @@ impl ArenaContract {
 
     pub fn start_round(env: Env) -> Result<RoundState, ArenaError> {
         require_not_paused(&env)?;
+        let current_state = get_state(&env);
+        if current_state == ArenaState::Cancelled {
+            panic!("Arena cancelled");
+        }
         if env
             .storage()
             .instance()
@@ -500,6 +567,11 @@ impl ArenaContract {
 
         storage(&env).set(&DataKey::Round, &next_round);
         bump(&env, &DataKey::Round);
+
+        if next_round.round_number == 1 {
+            set_state(&env, ArenaState::Active);
+        }
+
         env.events().publish(
             (TOPIC_ROUND_STARTED,),
             (
@@ -703,6 +775,10 @@ impl ArenaContract {
         storage(&env).set(&DataKey::Round, &round);
         bump(&env, &DataKey::Round);
 
+        if round.finished {
+            set_state(&env, ArenaState::Completed);
+        }
+
         env.events().publish(
             (TOPIC_ROUND_RESOLVED,),
             (
@@ -721,6 +797,10 @@ impl ArenaContract {
 
     pub fn claim(env: Env, winner: Address) -> Result<i128, ArenaError> {
         require_not_paused(&env)?;
+        let current_state = get_state(&env);
+        if current_state == ArenaState::Cancelled {
+            panic!("Arena cancelled");
+        }
         winner.require_auth();
         if !env
             .storage()
@@ -930,6 +1010,65 @@ impl ArenaContract {
             _ => None,
         }
     }
+
+    pub fn cancel_arena(env: Env, arena_id: u64) {
+        let current_state = get_state(&env);
+        let stored_id: u64 = env.storage().instance().get(&ARENA_ID_KEY).expect("not initialized");
+        if stored_id != arena_id {
+            panic!("Arena ID mismatch");
+        }
+
+        let admin: Address = env.storage().instance().get(&ADMIN_KEY).expect("not initialized");
+        let host: Address = env.storage().instance().get(&HOST_KEY).expect("not initialized");
+        let start_deadline: u64 = env.storage().instance().get(&START_DEADLINE_KEY).unwrap_or(0);
+        let players_list: Vec<Address> = env.storage().instance().get(&PLAYERS_KEY).unwrap_or(Vec::new(&env));
+        let player_count = players_list.len();
+
+        let auto_cancel = env.ledger().timestamp() > start_deadline && player_count < bounds::MIN_ARENA_PARTICIPANTS;
+
+        let cancelled_by = if auto_cancel {
+            env.current_contract_address()
+        } else {
+            match current_state {
+                ArenaState::Pending => {
+                    host.require_auth();
+                    host.clone()
+                },
+                ArenaState::Active => {
+                    admin.require_auth();
+                    admin.clone()
+                },
+                _ => panic!("Cannot cancel in this state"),
+            }
+        };
+
+        // CRITICAL: State Transition FIRST
+        set_state(&env, ArenaState::Cancelled);
+
+        // Refund Logic
+        let config = get_config(&env).expect("not initialized");
+        let entry_fee = config.required_stake_amount;
+        let token_addr: Address = env.storage().instance().get(&TOKEN_KEY).expect("token not set");
+        let token = token::Client::new(&env, &token_addr);
+
+        for player in players_list.iter() {
+            let refunded_key = DataKey::Refunded(player.clone());
+            if storage(&env).has(&refunded_key) {
+                panic!("AlreadyRefunded");
+            }
+            
+            token.transfer(&env.current_contract_address(), &player, &entry_fee);
+            storage(&env).set(&refunded_key, &true);
+        }
+
+        env.events().publish(
+            (TOPIC_CANCELLED,),
+            ArenaCancelled {
+                arena_id,
+                cancelled_by,
+            },
+        );
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -984,6 +1123,27 @@ fn outcome_symbol(outcome: &Option<Choice>) -> Symbol {
         Some(Choice::Tails) => symbol_short!("TAILS"),
         None => symbol_short!("NONE"),
     }
+}
+
+fn get_state(env: &Env) -> ArenaState {
+    storage(env)
+        .get(&DataKey::State)
+        .unwrap_or(ArenaState::Pending)
+}
+
+fn set_state(env: &Env, new_state: ArenaState) {
+    let old_state = get_state(env);
+    if old_state == new_state {
+        return;
+    }
+    storage(env).set(&DataKey::State, &new_state);
+    env.events().publish(
+        (TOPIC_STATE_CHANGED,),
+        ArenaStateChanged {
+            old_state,
+            new_state,
+        },
+    );
 }
 
 fn bump(env: &Env, key: &DataKey) {
