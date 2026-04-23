@@ -107,6 +107,8 @@ pub enum ArenaError {
     DeadlineTooFar = 43,
     DeadlineNotReached = 44,
     HashMismatch = 45,
+    HostCannotPlay = 46,
+    InvalidEntryFeeAmount = 47,
 }
 
 #[contracttype]
@@ -128,6 +130,8 @@ pub struct ArenaConfig {
     /// Payout uses this value rather than the current global fee so that
     /// fee changes cannot retroactively affect an in-progress game.
     pub win_fee_bps: u32,
+    /// Whether the arena host is allowed to join their own arena.
+    pub allow_host_play: bool,
 }
 
 #[contracttype]
@@ -393,6 +397,7 @@ impl ArenaContract {
                 winner_yield_share_bps: DEFAULT_WINNER_YIELD_SHARE_BPS,
                 join_deadline,
                 win_fee_bps,
+                allow_host_play: false,
             },
         );
         env.storage().instance().set(
@@ -476,8 +481,16 @@ impl ArenaContract {
             }
         }
 
+        if !config.allow_host_play {
+            if let Some(metadata) = Self::get_metadata(env.clone(), arena_id) {
+                if player == metadata.host {
+                    return Err(ArenaError::HostCannotPlay);
+                }
+            }
+        }
+
         if amount != config.required_stake_amount {
-            return Err(ArenaError::InvalidAmount);
+            return Err(ArenaError::InvalidEntryFeeAmount);
         }
         let key = DataKey::Survivor(player.clone());
         if env.storage().persistent().has(&key)
@@ -505,7 +518,7 @@ impl ArenaContract {
         token::Client::new(&env, &token_id).transfer(
             &player,
             &env.current_contract_address(),
-            &amount,
+            &config.required_stake_amount,
         );
         env.storage().persistent().set(&key, &true);
         bump(&env, &key);
@@ -523,7 +536,7 @@ impl ArenaContract {
             PlayerJoined {
                 arena_id,
                 player: player.clone(),
-                entry_fee: amount,
+                entry_fee: config.required_stake_amount,
             },
         );
         Ok(())
