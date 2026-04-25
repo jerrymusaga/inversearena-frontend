@@ -6,6 +6,14 @@ use soroban_sdk::{
 };
 #[path = "../../shared/upgrade.rs"]
 mod upgrade_utils;
+#[path = "../../shared/admin_transfer.rs"]
+mod admin_transfer_utils;
+use admin_transfer_utils::{
+    AdminTransferErrors, AdminTransferKeys, accept_admin_transfer as accept_admin_transfer_flow,
+    cancel_admin_transfer as cancel_admin_transfer_flow,
+    pending_admin_transfer as pending_admin_transfer_flow,
+    propose_admin_transfer as propose_admin_transfer_flow,
+};
 use upgrade_utils::{
     ExecuteTimePolicy, UpgradeErrors, UpgradeKeys, UpgradeTopics, cancel_upgrade as cancel_upgrade_flow,
     execute_upgrade as execute_upgrade_flow, pending_upgrade as pending_upgrade_flow,
@@ -1511,9 +1519,16 @@ impl FactoryContract {
     pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), Error> {
         let admin = require_admin(&env)?;
         admin.require_auth();
-        let expires_at = env.ledger().timestamp() + ADMIN_TRANSFER_EXPIRY;
-        env.storage().instance().set(&PENDING_ADMIN_KEY, &new_admin);
-        env.storage().instance().set(&ADMIN_EXPIRY_KEY, &expires_at);
+        let expires_at = propose_admin_transfer_flow(
+            &env,
+            AdminTransferKeys {
+                admin: &ADMIN_KEY,
+                pending_admin: &PENDING_ADMIN_KEY,
+                admin_expiry: &ADMIN_EXPIRY_KEY,
+            },
+            &new_admin,
+            ADMIN_TRANSFER_EXPIRY,
+        );
         env.events().publish(
             (TOPIC_ADMIN_PROPOSED,),
             (EVENT_VERSION, admin, new_admin, expires_at),
@@ -1525,28 +1540,21 @@ impl FactoryContract {
     /// within 7 days of the proposal.
     pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), Error> {
         new_admin.require_auth();
-        let pending: Address = env
-            .storage()
-            .instance()
-            .get(&PENDING_ADMIN_KEY)
-            .ok_or(Error::NoPendingAdminTransfer)?;
-        if pending != new_admin {
-            return Err(Error::Unauthorized);
-        }
-        let expires_at: u64 = env
-            .storage()
-            .instance()
-            .get(&ADMIN_EXPIRY_KEY)
-            .ok_or(Error::NoPendingAdminTransfer)?;
-        if env.ledger().timestamp() > expires_at {
-            env.storage().instance().remove(&PENDING_ADMIN_KEY);
-            env.storage().instance().remove(&ADMIN_EXPIRY_KEY);
-            return Err(Error::AdminTransferExpired);
-        }
         let old_admin = require_admin(&env)?;
-        env.storage().instance().set(&ADMIN_KEY, &new_admin);
-        env.storage().instance().remove(&PENDING_ADMIN_KEY);
-        env.storage().instance().remove(&ADMIN_EXPIRY_KEY);
+        accept_admin_transfer_flow(
+            &env,
+            AdminTransferKeys {
+                admin: &ADMIN_KEY,
+                pending_admin: &PENDING_ADMIN_KEY,
+                admin_expiry: &ADMIN_EXPIRY_KEY,
+            },
+            &new_admin,
+            AdminTransferErrors {
+                no_pending: Error::NoPendingAdminTransfer,
+                unauthorized: Error::Unauthorized,
+                expired: Error::AdminTransferExpired,
+            },
+        )?;
         env.events().publish(
             (TOPIC_ADMIN_ACCEPTED,),
             (EVENT_VERSION, old_admin, new_admin),
@@ -1558,11 +1566,15 @@ impl FactoryContract {
     pub fn cancel_admin_transfer(env: Env) -> Result<(), Error> {
         let admin = require_admin(&env)?;
         admin.require_auth();
-        if !env.storage().instance().has(&PENDING_ADMIN_KEY) {
-            return Err(Error::NoPendingAdminTransfer);
-        }
-        env.storage().instance().remove(&PENDING_ADMIN_KEY);
-        env.storage().instance().remove(&ADMIN_EXPIRY_KEY);
+        cancel_admin_transfer_flow(
+            &env,
+            AdminTransferKeys {
+                admin: &ADMIN_KEY,
+                pending_admin: &PENDING_ADMIN_KEY,
+                admin_expiry: &ADMIN_EXPIRY_KEY,
+            },
+            Error::NoPendingAdminTransfer,
+        )?;
         env.events()
             .publish((TOPIC_ADMIN_CANCELLED,), (EVENT_VERSION,));
         Ok(())
@@ -1570,12 +1582,14 @@ impl FactoryContract {
 
     /// Return the pending admin address and expiry timestamp, or `None` if none.
     pub fn pending_admin_transfer(env: Env) -> Option<(Address, u64)> {
-        let addr: Option<Address> = env.storage().instance().get(&PENDING_ADMIN_KEY);
-        let exp: Option<u64> = env.storage().instance().get(&ADMIN_EXPIRY_KEY);
-        match (addr, exp) {
-            (Some(a), Some(e)) => Some((a, e)),
-            _ => None,
-        }
+        pending_admin_transfer_flow(
+            &env,
+            AdminTransferKeys {
+                admin: &ADMIN_KEY,
+                pending_admin: &PENDING_ADMIN_KEY,
+                admin_expiry: &ADMIN_EXPIRY_KEY,
+            },
+        )
     }
 }
 

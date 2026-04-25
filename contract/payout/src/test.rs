@@ -530,6 +530,36 @@ fn read_functions_unaffected_by_payout_pause() {
 }
 
 #[test]
+fn pause_allows_currency_token_rotation_for_incident_response() {
+    let (_env, _admin, client, token_id, _treasury, _factory_id, _factory_client) = setup_with_token();
+    let currency = symbol_short!("USDC");
+
+    client.pause();
+    assert!(client.is_paused());
+
+    let result = client.try_set_currency_token(&currency, &token_id);
+    assert!(
+        result.is_ok(),
+        "set_currency_token must remain callable while paused"
+    );
+}
+
+#[test]
+fn pause_allows_admin_transfer_controls() {
+    let (env, _admin, client, _, _factory_client) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.pause();
+    assert!(client.is_paused());
+
+    client.propose_admin(&new_admin);
+    assert_eq!(client.pending_admin_transfer().unwrap().0, new_admin);
+
+    client.accept_admin(&new_admin);
+    assert_eq!(client.admin(), new_admin);
+}
+
+#[test]
 fn payout_history_empty_page() {
     let (_env, _admin, client, _, _factory_client) = setup();
     let page = client.get_payout_history(&None, &10u32);

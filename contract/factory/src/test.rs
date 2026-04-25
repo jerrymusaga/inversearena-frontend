@@ -1476,6 +1476,35 @@ fn read_functions_unaffected_by_factory_pause() {
     assert!(client.is_paused());
 }
 
+#[test]
+fn pause_allows_factory_admin_transfer_controls() {
+    let (env, _admin, client) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.pause();
+    assert!(client.is_paused());
+
+    client.propose_admin(&new_admin);
+    assert_eq!(client.pending_admin_transfer().unwrap().0, new_admin);
+    client.accept_admin(&new_admin);
+
+    assert_eq!(client.admin(), new_admin);
+}
+
+#[test]
+fn pause_allows_factory_upgrade_governance() {
+    let (env, _admin, client) = setup();
+    let hash = dummy_hash(&env);
+
+    client.pause();
+    assert!(client.is_paused());
+
+    client.propose_upgrade(&hash);
+    assert_eq!(client.pending_upgrade().unwrap().0, hash);
+    assert!(client.try_cancel_upgrade().is_ok());
+    assert!(client.pending_upgrade().is_none());
+}
+
 // ── Arena Status Tracking ─────────────────────────────────────────────────────
 
 #[test]

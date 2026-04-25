@@ -1694,6 +1694,21 @@ fn test_set_token_succeeds_when_paused() {
     assert_eq!(configured_token, new_token_id);
 }
 
+#[test]
+fn test_admin_transfer_controls_succeed_when_paused() {
+    let (env, _admin, client) = setup_with_admin();
+    let new_admin = Address::generate(&env);
+
+    client.pause();
+    assert!(client.is_paused());
+
+    client.propose_admin(&new_admin);
+    assert_eq!(client.pending_admin_transfer().unwrap().0, new_admin);
+    client.accept_admin(&new_admin);
+
+    assert_eq!(client.admin(), new_admin);
+}
+
 /// When paused, normal game functions are blocked but governance functions are not.
 /// This is the core invariant of the Emergency Pause Policy.
 #[test]
