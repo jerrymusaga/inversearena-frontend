@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, contracterror, Address};
 
 /// Lifecycle state of an arena.
 ///
@@ -26,7 +26,11 @@ pub struct ArenaConfig {
 }
 
 /// Error codes returned by arena contract functions.
-#[contracttype]
+///
+/// Must use `#[contracterror]` (not `#[contracttype]`) so the Soroban macro
+/// can derive the `From<soroban_sdk::Error>` / `Into<soroban_sdk::Error>` impls
+/// required by `#[contractimpl]` when the function returns `Result<_, ArenaError>`.
+#[contracterror]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArenaError {
     /// Caller is not authorised to perform this operation.
