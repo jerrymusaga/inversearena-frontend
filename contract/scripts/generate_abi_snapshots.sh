@@ -18,7 +18,22 @@ if [[ "${1:-}" == "--check" ]]; then
   CHECK_MODE=true
 fi
 
-WASM_DIR="target/wasm32-unknown-unknown/release"
+# Stellar CLI >= 21 targets wasm32v1-none; older toolchains use wasm32-unknown-unknown.
+# Resolve whichever directory was actually produced by the build.
+WASM_DIR=""
+for candidate in \
+  "target/wasm32v1-none/release" \
+  "target/wasm32-unknown-unknown/release"; do
+  if ls "${candidate}"/*.wasm &>/dev/null 2>&1; then
+    WASM_DIR="$candidate"
+    break
+  fi
+done
+if [[ -z "$WASM_DIR" ]]; then
+  echo "Error: no WASM build artifacts found. Run 'stellar contract build' first." >&2
+  exit 1
+fi
+
 CONTRACTS=("arena" "factory" "payout" "staking")
 FAILED=0
 
