@@ -1,9 +1,15 @@
 #![allow(dead_code)]
-use crate::types::{ArenaConfig, ArenaError};
-use soroban_sdk::{Address, Env, Vec, symbol_short};
+use crate::types::{ArenaConfig, ArenaError, PlayerState};
+use soroban_sdk::{Address, Env, Vec, contracttype, symbol_short};
 
 const CONFIG_KEY: &str = "CONFIG";
 const PLAYERS_KEY: &str = "PLAYERS";
+
+/// Storage key for an individual player's state, keyed by their address.
+#[contracttype]
+enum DataKey {
+    Player(Address),
+}
 
 pub struct ArenaStorage;
 
@@ -39,6 +45,36 @@ impl ArenaStorage {
         let mut players = Self::load_all_players(env);
         players.push_back(player.clone());
         Self::save_players(env, &players);
+
+        // Initialise the joining player's state (active, no rounds survived yet).
+        Self::save_player(
+            env,
+            player,
+            &PlayerState {
+                active: true,
+                rounds_survived: 0,
+            },
+        );
+
+        // Keep the cached player count in `config` in sync so `player_count`
+        // can be served without scanning the players list.
+        if let Ok(mut config) = Self::load_config(env) {
+            config.player_count = players.len();
+            Self::save_config(env, &config);
+        }
+    }
+
+    /// Load a single player's state, or `None` if they never joined.
+    pub fn load_player(env: &Env, player: &Address) -> Option<PlayerState> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Player(player.clone()))
+    }
+
+    pub fn save_player(env: &Env, player: &Address, state: &PlayerState) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Player(player.clone()), state);
     }
 }
 

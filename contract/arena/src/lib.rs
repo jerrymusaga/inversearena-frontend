@@ -1,11 +1,14 @@
 #![no_std]
-use soroban_sdk::{Env, contract, contractimpl, token};
+use soroban_sdk::{Address, Env, Vec, contract, contractimpl, token};
 
 mod storage;
 mod types;
 
 use storage::ArenaStorage;
-use types::{ArenaError, GameState};
+use types::{ArenaError, GameState, PlayerState};
+
+/// Number of players returned per `get_players` page.
+const PAGE_SIZE: u32 = 50;
 
 /// Arena contract — manages round lifecycle, player choices, and elimination logic.
 ///
@@ -57,5 +60,115 @@ impl ArenaContract {
             .publish((soroban_sdk::symbol_short!("cancelled"),), ());
 
         Ok(())
+    }
+
+    /// Returns a paginated list of all players with their current state.
+    ///
+    /// `page` is 0-indexed; the page size is [`PAGE_SIZE`] (50). Players are
+    /// returned in join order, so a given player appears on exactly one page
+    /// for a stable players list. Pages beyond the end return an empty list.
+    ///
+    /// Intended for indexers, analytics tools, and the backend event processor
+    /// to perform an initial state sync without replaying the event log.
+    pub fn get_players(env: Env, page: u32) -> Vec<(Address, PlayerState)> {
+        let all = ArenaStorage::load_all_players(&env);
+        let len = all.len();
+        let start = page.saturating_mul(PAGE_SIZE);
+        let end = start.saturating_add(PAGE_SIZE).min(len);
+
+        let mut result: Vec<(Address, PlayerState)> = Vec::new(&env);
+        let mut i = start;
+        while i < end {
+            let addr = all.get(i).unwrap();
+            let state = ArenaStorage::load_player(&env, &addr).unwrap_or_default();
+            result.push_back((addr, state));
+            i += 1;
+        }
+        result
+    }
+
+    /// Returns the total number of players who have joined this arena.
+    pub fn player_count(env: Env) -> u32 {
+        ArenaStorage::load_config(&env)
+            .map(|c| c.player_count)
+            .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::types::ArenaConfig;
+    use soroban_sdk::testutils::Address as _;
+
+    /// Register the contract and seed `n` joined players, returning the client.
+    fn setup(n: u32) -> (Env, ArenaContractClient<'static>) {
+        let env = Env::default();
+        let contract_id = env.register(ArenaContract, ());
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: Address::generate(&env),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+            };
+            ArenaStorage::save_config(&env, &config);
+            for _ in 0..n {
+                let player = Address::generate(&env);
+                ArenaStorage::add_player(&env, &player);
+            }
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        (env, client)
+    }
+
+    #[test]
+    fn zero_players() {
+        let (_env, client) = setup(0);
+        assert_eq!(client.player_count(), 0);
+        assert_eq!(client.get_players(&0).len(), 0);
+    }
+
+    #[test]
+    fn one_player() {
+        let (_env, client) = setup(1);
+        assert_eq!(client.player_count(), 1);
+
+        let page0 = client.get_players(&0);
+        assert_eq!(page0.len(), 1);
+        // The joined player is recorded as active with no rounds survived yet.
+        let (_addr, state) = page0.get(0).unwrap();
+        assert!(state.active);
+        assert_eq!(state.rounds_survived, 0);
+
+        // No second page.
+        assert_eq!(client.get_players(&1).len(), 0);
+    }
+
+    #[test]
+    fn fifty_one_players_cross_page_boundary() {
+        let (_env, client) = setup(51);
+        assert_eq!(client.player_count(), 51);
+
+        let page0 = client.get_players(&0);
+        let page1 = client.get_players(&1);
+        let page2 = client.get_players(&2);
+
+        assert_eq!(page0.len(), PAGE_SIZE); // 50
+        assert_eq!(page1.len(), 1);
+        assert_eq!(page2.len(), 0);
+
+        // Pagination is consistent: no player appears on two pages.
+        for (addr1, _) in page1.iter() {
+            for (addr0, _) in page0.iter() {
+                assert_ne!(addr0, addr1);
+            }
+        }
+
+        // The two pages together cover every player exactly once.
+        assert_eq!(page0.len() + page1.len(), client.player_count());
     }
 }

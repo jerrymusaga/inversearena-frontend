@@ -23,6 +23,23 @@ pub struct ArenaConfig {
     pub stake_token: Address,
     pub entry_fee: i128,
     pub state: GameState,
+    /// Total number of players that have ever joined this arena. Kept in sync
+    /// by `ArenaStorage::add_player` so it can be read without scanning storage.
+    pub player_count: u32,
+}
+
+/// Per-player state stored in persistent storage, keyed by the player address.
+///
+/// Returned (alongside the address) by `get_players` so indexers, analytics
+/// tools, and the backend event processor can sync arena state without
+/// replaying the `player_joined` event log.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct PlayerState {
+    /// Whether the player is still in the game (not yet eliminated).
+    pub active: bool,
+    /// Number of rounds the player has survived so far.
+    pub rounds_survived: u32,
 }
 
 /// Error codes returned by arena contract functions.
