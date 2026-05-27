@@ -4,6 +4,7 @@ import { asyncHandler } from "../middleware/validate";
 import { cacheMiddleware } from "../middleware/cache";
 import { cacheTTL } from "../cache/cacheService";
 import { prisma } from "../db/prisma";
+import { createRateLimitMiddleware, poolsRateLimitConfig } from "../middleware/rateLimit";
 import type { RequestHandler } from "express";
 
 const PaginationSchema = z.object({
@@ -49,6 +50,31 @@ function formatEliminationLog(log: {
 
 export function createPoolsRouter(authMiddleware: RequestHandler): Router {
   const router = Router();
+
+  const poolsRateLimiter = createRateLimitMiddleware(poolsRateLimitConfig);
+
+  /**
+   * POST /api/pools
+   * Rate-limited pool creation endpoint.
+   */
+  router.post(
+    "/",
+    authMiddleware,
+    poolsRateLimiter,
+    asyncHandler(async (req, res) => {
+      const PoolCreateSchema = z.object({
+        arenaId: z.string().uuid(),
+        stakeAmount: z.number().positive(),
+      });
+      const { arenaId, stakeAmount } = PoolCreateSchema.parse(req.body);
+
+      const pool = await prisma.pool.create({
+        data: { arenaId, stakeAmount },
+      });
+
+      res.status(201).json(pool);
+    }),
+  );
 
   /**
    * GET /api/pools/:id/eliminations

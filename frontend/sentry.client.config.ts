@@ -16,6 +16,7 @@
  */
 
 import * as Sentry from "@sentry/nextjs";
+import { scrubStellarAddresses } from "./src/lib/sentry";
 
 Sentry.init({
   dsn: process.env.NEXT_PUBLIC_SENTRY_DSN,
@@ -51,6 +52,9 @@ Sentry.init({
       const { id } = event.user;
       event.user = id ? { id } : undefined;
     }
-    return event;
+
+    // Scrub Stellar wallet addresses from all event fields to prevent
+    // linking on-chain identities to Sentry sessions.
+    return scrubStellarAddresses(event);
   },
 });

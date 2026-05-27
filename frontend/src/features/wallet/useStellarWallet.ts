@@ -1,4 +1,4 @@
-import { ISupportedWallet, StellarWalletsKit, Networks } from "@creit-tech/stellar-wallets-kit";
+import { StellarWalletsKit, Networks } from "@creit-tech/stellar-wallets-kit";
 import { FreighterModule } from "@creit-tech/stellar-wallets-kit/modules/freighter";
 import { xBullModule } from "@creit-tech/stellar-wallets-kit/modules/xbull";
 import { AlbedoModule } from "@creit-tech/stellar-wallets-kit/modules/albedo";
@@ -13,6 +13,13 @@ export interface WalletHook {
   error: string | null;
   connectWallet: () => Promise<void>;
   disconnectWallet: () => void;
+}
+
+// Stellar public keys start with G and are exactly 56 alphanumeric (base32) characters.
+const STELLAR_PUBLIC_KEY_REGEX = /^G[A-Z2-7]{55}$/;
+
+export function isValidStellarPublicKey(address: string): boolean {
+  return STELLAR_PUBLIC_KEY_REGEX.test(address);
 }
 
 /**
@@ -42,6 +49,15 @@ export const useStellarWallet = (network: Networks): WalletHook => {
       setStatus('connecting');
       setError(null);
       const { address } = await StellarWalletsKit.authModal();
+
+      if (!isValidStellarPublicKey(address)) {
+        setIsConnected(false);
+        setPublicKey(null);
+        setStatus('error');
+        setError('Wallet returned an invalid public key. Please try reconnecting.');
+        return;
+      }
+
       setPublicKey(address);
       setIsConnected(true);
       setStatus('connected');
