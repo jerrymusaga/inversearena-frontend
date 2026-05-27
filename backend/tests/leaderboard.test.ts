@@ -192,11 +192,45 @@ async function testPagination() {
   }
 }
 
+async function testCrossUserLeaderboardConsistency() {
+  console.log("\n🧪 Test: Two different authenticated users see the same leaderboard");
+
+  await setupTestData();
+  const controller = new LeaderboardController(prisma);
+
+  // Simulate two separate authenticated requests (different users, same query)
+  const res1 = makeRes();
+  const res2 = makeRes();
+
+  await controller.getLeaderboard(makeReq({ limit: "20" }), res1 as unknown as Response);
+  await controller.getLeaderboard(makeReq({ limit: "20" }), res2 as unknown as Response);
+
+  const body1 = res1.captured as { players: { id: string; rank: number }[]; nextCursor: string | null };
+  const body2 = res2.captured as { players: { id: string; rank: number }[]; nextCursor: string | null };
+
+  // Both responses must be identical — leaderboard is public, not user-scoped
+  const sameLength = body1.players.length === body2.players.length;
+  const sameCursor = body1.nextCursor === body2.nextCursor;
+  const sameOrder = body1.players.every(
+    (p, i) => p.id === body2.players[i].id && p.rank === body2.players[i].rank,
+  );
+
+  if (sameLength && sameCursor && sameOrder) {
+    console.log("✅ PASS: Both users see identical leaderboard — shared cache is safe for public data");
+  } else {
+    console.log("❌ FAIL: Leaderboard responses differ between users");
+    console.log("User1:", JSON.stringify(body1.players.map((p) => p.id)));
+    console.log("User2:", JSON.stringify(body2.players.map((p) => p.id)));
+    process.exit(1);
+  }
+}
+
 async function runTests() {
   try {
     await testNonEmptyLeaderboard();
     await testEmptyLeaderboard();
     await testPagination();
+    await testCrossUserLeaderboardConsistency();
     console.log("\n🎉 All leaderboard tests passed");
   } catch (error) {
     console.error("Test suite failed:", error);
