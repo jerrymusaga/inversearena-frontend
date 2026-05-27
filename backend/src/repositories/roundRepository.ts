@@ -19,6 +19,13 @@ export class RoundRepository {
     });
 
     return {
+      id: round.id,
+      arenaId: round.arenaId,
+      roundNumber: round.roundNumber,
+      state: round.state as RoundState,
+      playerChoices: [],
+      createdAt: round.createdAt,
+      updatedAt: round.updatedAt,
       ...this.mapRound(round),
     };
   }
@@ -170,6 +177,11 @@ export class RoundRepository {
     };
   }
 
+  async updateState(roundId: string, state: RoundState): Promise<void> {
+    await this.prisma.round.update({
+      where: { id: roundId },
+      data: { state, updatedAt: new Date() },
+    });
   private parseState(state: string): RoundState {
     if (Object.values(RoundState).includes(state as RoundState)) {
       return state as RoundState;
