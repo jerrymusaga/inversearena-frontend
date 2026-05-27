@@ -50,6 +50,7 @@ import {
   extractBoolFromScVal,
   extractI128FromScVal,
   extractU32FromScVal,
+  stroopsToDisplayAmount,
 } from "@/shared-d/utils/stellar-scval-extract";
 
 // Re-export so consumers can import from one place
@@ -411,9 +412,10 @@ export async function fetchArenaState(
       extractU32FromScVal(stateData, "survivors_count") || 0;
     const maxCapacity = extractU32FromScVal(stateData, "max_capacity") || 0;
     const roundNumber = extractU32FromScVal(stateData, "round_number") || 0;
-    const currentStake = extractI128FromScVal(stateData, "current_stake") || 0;
+    const currentStakeStroops =
+      extractI128FromScVal(stateData, "current_stake") ?? 0n;
     const potentialPayout =
-      extractI128FromScVal(stateData, "potential_payout") || 0;
+      extractI128FromScVal(stateData, "potential_payout") ?? 0n;
     const isUserIn = extractBoolFromScVal(stateData, "is_active") || false;
     const hasWon = extractBoolFromScVal(stateData, "has_won") || false;
 
@@ -423,8 +425,8 @@ export async function fetchArenaState(
       maxCapacity,
       isUserIn,
       hasWon,
-      currentStake,
-      potentialPayout,
+      currentStake: stroopsToDisplayAmount(currentStakeStroops),
+      potentialPayout: stroopsToDisplayAmount(potentialPayout),
       roundNumber,
     };
   } catch (error) {

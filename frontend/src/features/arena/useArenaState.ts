@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef } from "react";
-import { fetchArenaState } from "@/shared-d/utils/stellar-transactions";
+import {
+  fetchArenaState,
+  type ArenaStateResponse,
+} from "@/shared-d/utils/stellar-transactions";
 
 export type ArenaHealthStatus = "connected" | "degraded" | "offline";
 
@@ -20,6 +23,20 @@ export interface UseArenaStateReturn {
   health: ArenaHealthStatus;
 }
 
+function toArenaState(data: ArenaStateResponse): ArenaState {
+  return {
+    id: data.arenaId,
+    state: data.hasWon ? "finished" : "active",
+    survivorsCount: data.survivorsCount,
+    maxCapacity: data.maxCapacity,
+    currentRound: data.roundNumber,
+    isUserIn: data.isUserIn,
+    hasWon: data.hasWon,
+    currentStake: data.currentStake,
+    potentialPayout: data.potentialPayout,
+  };
+}
+
 export function useArenaState(arenaId: string): UseArenaStateReturn {
   const [state, setState] = useState<ArenaState | null>(null);
   const [health, setHealth] = useState<ArenaHealthStatus>("connected");
@@ -30,6 +47,14 @@ export function useArenaState(arenaId: string): UseArenaStateReturn {
   useEffect(() => {
     isMounted.current = true;
 
+    if (!arenaId) {
+      setState(null);
+      setHealth("connected");
+      return () => {
+        isMounted.current = false;
+      };
+    }
+
     async function poll() {
       try {
         // fetchArenaState expects (arenaId, userAddress) — pass empty string when no address
@@ -37,13 +62,13 @@ export function useArenaState(arenaId: string): UseArenaStateReturn {
 
         if (!isMounted.current) return;
 
-        setState(data as unknown as ArenaState);
+        const nextState = toArenaState(data);
+        setState(nextState);
         errorCount.current = 0;
         setHealth("connected");
 
         // Slow down when game is finished
-        const interval =
-          (data as unknown as ArenaState).state === "finished" ? 30_000 : 5_000;
+        const interval = nextState.state === "finished" ? 30_000 : 5_000;
         timeoutId.current = setTimeout(poll, interval);
       } catch {
         if (!isMounted.current) return;
