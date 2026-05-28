@@ -2,6 +2,7 @@
 use soroban_sdk::{Address, Bytes, BytesN, Env, Vec, contract, contractimpl, token};
 
 mod eliminations;
+mod oracle;
 mod snapshot_test;
 mod state_machine;
 mod storage;
@@ -38,6 +39,7 @@ impl ArenaContract {
         stake_token: Address,
         yield_vault: Address,
         entry_fee: i128,
+        oracle_contract: Address,
     ) -> Result<(), ArenaError> {
         admin.require_auth();
 
@@ -50,6 +52,7 @@ impl ArenaContract {
             player_count: 0,
             commit_deadline: u64::MAX,
             round_count: 0,
+            oracle_contract,
         };
         ArenaStorage::save_config(&env, &config);
 
@@ -286,11 +289,16 @@ impl ArenaContract {
             return Err(ArenaError::GracePeriodNotElapsed);
         }
 
+        // Fetch the current yield rate from the on-chain oracle. Defaults to
+        // 0 bps if the oracle is unavailable — liveness over precision.
+        let yield_bps = oracle::fetch_yield_bps(&env, &config.oracle_contract);
+        ArenaStorage::save_round_yield_bps(&env, config.round_count, yield_bps);
+
         config.state = GameState::Finished;
         ArenaStorage::save_config(&env, &config);
 
         env.events()
-            .publish((soroban_sdk::symbol_short!("resolved"),), ());
+            .publish((soroban_sdk::symbol_short!("resolved"),), yield_bps);
         Ok(())
     }
 
@@ -346,12 +354,24 @@ impl ArenaContract {
 mod test {
     use super::*;
     use crate::types::ArenaConfig;
-    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::{contract, contractimpl, testutils::{Address as _, Ledger as _}};
+
+    /// Minimal mock oracle that always returns 0 bps — enough for resolve_round tests.
+    #[contract]
+    struct MockOracle;
+
+    #[contractimpl]
+    impl MockOracle {
+        pub fn get_current_yield_bps(_env: Env) -> u32 {
+            0
+        }
+    }
 
     /// Register the contract and seed `n` joined players, returning the client.
     fn setup(n: u32) -> (Env, ArenaContractClient<'static>) {
         let env = Env::default();
         let contract_id = env.register(ArenaContract, ());
+        let oracle_id = env.register(MockOracle, ());
 
         env.as_contract(&contract_id, || {
             let config = ArenaConfig {
@@ -363,6 +383,7 @@ mod test {
                 commit_deadline: u64::MAX,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: oracle_id,
             };
             ArenaStorage::save_config(&env, &config);
             for _ in 0..n {
@@ -452,6 +473,7 @@ mod test {
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: Address::generate(&env),
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::save_commitment(&env, &player, &commitment);
@@ -485,6 +507,7 @@ mod test {
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: Address::generate(&env),
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::save_commitment(&env, &player, &commitment);
@@ -514,6 +537,7 @@ mod test {
                 commit_deadline: 1,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: Address::generate(&env),
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::save_commitment(&env, &player, &commitment);
@@ -544,6 +568,7 @@ mod test {
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: Address::generate(&env),
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::save_commitment(&env, &player, &commitment);
@@ -575,6 +600,7 @@ mod test {
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: Address::generate(&env),
             };
             ArenaStorage::save_config(&env, &config);
         });
@@ -590,6 +616,7 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register(ArenaContract, ());
+        let oracle_id = env.register(MockOracle, ());
         env.as_contract(&contract_id, || {
             let config = ArenaConfig {
                 admin: Address::generate(&env),
@@ -600,6 +627,7 @@ mod test {
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: oracle_id,
             };
             ArenaStorage::save_config(&env, &config);
         });
@@ -647,6 +675,7 @@ mod test {
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: Address::generate(&env),
             };
             ArenaStorage::save_config(&env, &config);
         });

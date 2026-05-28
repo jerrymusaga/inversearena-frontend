@@ -53,6 +53,10 @@ pub struct ArenaConfig {
     pub commit_deadline: u64,
     /// Number of completed rounds so far. Incremented when a round resolves.
     pub round_count: u32,
+    /// On-chain oracle contract that supplies the current USDY yield rate in
+    /// basis points. Called once per `resolve_round` to snapshot the rate.
+    /// If the oracle is unavailable the round defaults to 0 bps yield.
+    pub oracle_contract: Address,
 }
 
 /// Per-player state stored in persistent storage, keyed by the player address.
