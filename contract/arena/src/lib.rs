@@ -237,10 +237,26 @@ impl ArenaContract {
         winner.require_auth();
         let mut config = ArenaStorage::load_config(&env)?;
 
+        // CHECKS — validate caller and arena state before doing anything else.
         if config.state != GameState::Finished {
             return Err(ArenaError::GameNotFinished);
         }
+        if ArenaStorage::prize_claimed(&env) {
+            return Err(ArenaError::PrizeAlreadyClaimed);
+        }
+        let player_state = ArenaStorage::load_player(&env, &winner).unwrap_or_default();
+        if !player_state.active {
+            return Err(ArenaError::PlayerEliminated);
+        }
 
+        // EFFECTS — persist state changes BEFORE any cross-contract call so a
+        // malicious stake-token re-entering `claim` sees the claimed flag and
+        // fails with PrizeAlreadyClaimed.
+        ArenaStorage::mark_prize_claimed(&env);
+        config.state = GameState::Settled;
+        ArenaStorage::save_config(&env, &config);
+
+        // INTERACTIONS — external calls happen only after state is committed.
         let arena_addr = env.current_contract_address();
         let rwa_client = RwaAdapterClient::new(&env, &config.yield_vault);
         let principal = config.entry_fee * i128::from(config.player_count);
@@ -259,8 +275,6 @@ impl ArenaContract {
         let token_client = token::TokenClient::new(&env, &config.stake_token);
         token_client.transfer(&arena_addr, &winner, &total);
 
-        config.state = GameState::Settled;
-        ArenaStorage::save_config(&env, &config);
         ArenaEvents::prize_claimed(&env, &winner, total, total.saturating_sub(principal));
         Ok(())
     }
@@ -773,5 +787,101 @@ mod test {
         assert_eq!(client.get_yield_snapshot(&1).unwrap().accrued, 10);
         assert_eq!(client.get_yield_snapshot(&2).unwrap().accrued, 15);
         assert_eq!(client.get_yield_snapshot(&3).unwrap().accrued, 25);
+    }
+
+    /// Reentrancy guard: if the prize-claimed flag has been set (which `claim`
+    /// does *before* it performs any external token transfer) a subsequent
+    /// call to `claim` — including a reentrant call triggered by a malicious
+    /// `token.transfer` hook — must short-circuit with `PrizeAlreadyClaimed`.
+    ///
+    /// This pins the checks-effects-interactions ordering of `claim`: any
+    /// future refactor that moves the `mark_prize_claimed` call after a
+    /// cross-contract interaction will fail this test.
+    #[test]
+    fn claim_returns_already_claimed_when_flag_is_set() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let winner = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            ArenaStorage::save_config(
+                &env,
+                &ArenaConfig {
+                    admin: Address::generate(&env),
+                    stake_token: Address::generate(&env),
+                    entry_fee: 100,
+                    state: GameState::Finished,
+                    player_count: 1,
+                    commit_deadline: 0,
+                    yield_vault: Address::generate(&env),
+                    round_count: 0,
+                    oracle_contract: Address::generate(&env),
+                },
+            );
+            ArenaStorage::save_player(
+                &env,
+                &winner,
+                &PlayerState {
+                    active: true,
+                    rounds_survived: 1,
+                },
+            );
+            // Simulate the state a reentrant caller would observe: claim has
+            // already committed its EFFECTS step and is mid-INTERACTIONS.
+            ArenaStorage::mark_prize_claimed(&env);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        let err = client
+            .try_claim(&winner)
+            .err()
+            .expect("reentrant claim must error")
+            .expect("error must be a contract error");
+        assert_eq!(err, ArenaError::PrizeAlreadyClaimed);
+    }
+
+    /// An eliminated player must not be able to claim the prize, even if the
+    /// game state is Finished. Guards against a stale winner address being
+    /// reused after elimination logic changes.
+    #[test]
+    fn claim_rejects_eliminated_player() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let eliminated = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            ArenaStorage::save_config(
+                &env,
+                &ArenaConfig {
+                    admin: Address::generate(&env),
+                    stake_token: Address::generate(&env),
+                    entry_fee: 100,
+                    state: GameState::Finished,
+                    player_count: 1,
+                    commit_deadline: 0,
+                    yield_vault: Address::generate(&env),
+                    round_count: 0,
+                    oracle_contract: Address::generate(&env),
+                },
+            );
+            ArenaStorage::save_player(
+                &env,
+                &eliminated,
+                &PlayerState {
+                    active: false,
+                    rounds_survived: 0,
+                },
+            );
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        let err = client
+            .try_claim(&eliminated)
+            .err()
+            .expect("eliminated player claim must error")
+            .expect("error must be a contract error");
+        assert_eq!(err, ArenaError::PlayerEliminated);
     }
 }

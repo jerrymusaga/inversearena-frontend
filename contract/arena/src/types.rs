@@ -129,4 +129,8 @@ pub enum ArenaError {
     AlreadyInitialized = 10,
     /// Operation requires the game to be finished.
     GameNotFinished = 11,
+    /// Prize has already been claimed for this game.
+    PrizeAlreadyClaimed = 12,
+    /// Player was eliminated and cannot perform this action.
+    PlayerEliminated = 13,
 }

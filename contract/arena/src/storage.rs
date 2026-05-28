@@ -17,6 +17,7 @@ enum DataKey {
     RoundStart,
     RoundDuration,
     LastVaultBalance,
+    PrizeClaimed,
 }
 
 pub struct ArenaStorage;
@@ -175,6 +176,25 @@ impl ArenaStorage {
             .persistent()
             .get(&DataKey::LastVaultBalance)
             .unwrap_or(0)
+    }
+
+    /// Returns true once the prize has been claimed for this arena. Read inside
+    /// `claim` so a reentrant call sees the flag and bails out with
+    /// `PrizeAlreadyClaimed` before the token transfer can run a second time.
+    pub fn prize_claimed(env: &Env) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PrizeClaimed)
+            .unwrap_or(false)
+    }
+
+    /// Persist the prize-claimed flag. MUST be called before any external
+    /// (cross-contract) call in `claim` so that a malicious token contract
+    /// re-entering the arena cannot replay the claim.
+    pub fn mark_prize_claimed(env: &Env) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::PrizeClaimed, &true);
     }
 }
 
