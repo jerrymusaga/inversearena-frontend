@@ -13,6 +13,8 @@ pub enum GameState {
     Finished,
     /// Admin cancelled before the game started; all entry fees refunded.
     Cancelled,
+    /// Prize has been distributed to the winner; arena is fully resolved.
+    Settled,
 }
 
 /// A player's coin-flip choice for a round.
@@ -39,6 +41,8 @@ impl Choice {
 pub struct ArenaConfig {
     pub admin: Address,
     pub stake_token: Address,
+    /// Address of the yield-bearing RWA vault adapter contract.
+    pub yield_vault: Address,
     pub entry_fee: i128,
     pub state: GameState,
     /// Total number of players that have ever joined this arena. Kept in sync
@@ -47,6 +51,8 @@ pub struct ArenaConfig {
     /// Ledger timestamp (seconds) after which commitments are no longer
     /// accepted and the reveal phase begins.
     pub commit_deadline: u64,
+    /// Number of completed rounds so far. Incremented when a round resolves.
+    pub round_count: u32,
 }
 
 /// Per-player state stored in persistent storage, keyed by the player address.
@@ -61,6 +67,15 @@ pub struct PlayerState {
     pub active: bool,
     /// Number of rounds the player has survived so far.
     pub rounds_survived: u32,
+}
+
+/// Per-round yield snapshot stored in persistent storage, keyed by round number.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct YieldSnapshot {
+    pub round: u32,
+    pub total_deposited: i128,
+    pub total_yield: i128,
 }
 
 /// Error codes returned by arena contract functions.
@@ -95,4 +110,6 @@ pub enum ArenaError {
     GracePeriodNotElapsed = 10,
     /// The operation requires the arena to be in the Active state.
     RoundNotActive = 11,
+    /// Player has already joined this arena.
+    AlreadyJoined = 12,
 }

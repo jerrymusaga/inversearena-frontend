@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use crate::types::{ArenaConfig, ArenaError, Choice, PlayerState};
+use crate::types::{ArenaConfig, ArenaError, Choice, PlayerState, YieldSnapshot};
 use soroban_sdk::{Address, BytesN, Env, Vec, contracttype, symbol_short};
 
 const CONFIG_KEY: &str = "CONFIG";
@@ -11,6 +11,7 @@ enum DataKey {
     Player(Address),
     Commitment(Address),
     Choice(Address),
+    YieldSnapshot(u32),
 }
 
 pub struct ArenaStorage;
@@ -139,6 +140,18 @@ impl ArenaStorage {
         env.storage()
             .persistent()
             .has(&DataKey::Choice(player.clone()))
+    }
+
+    pub fn save_yield_snapshot(env: &Env, round: u32, snapshot: &YieldSnapshot) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::YieldSnapshot(round), snapshot);
+    }
+
+    pub fn load_yield_snapshot(env: &Env, round: u32) -> Option<YieldSnapshot> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::YieldSnapshot(round))
     }
 }
 

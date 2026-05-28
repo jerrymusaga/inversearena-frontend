@@ -1,4 +1,4 @@
-﻿#![no_std]
+#![no_std]
 use soroban_sdk::{Address, Bytes, BytesN, Env, Vec, contract, contractimpl, token};
 
 mod eliminations;
@@ -7,16 +7,17 @@ mod state_machine;
 mod storage;
 mod types;
 
+use rwa_adapter::RwaAdapterClient;
 use storage::ArenaStorage;
-use types::{ArenaError, Choice, GameState, PlayerState};
+use types::{ArenaConfig, ArenaError, Choice, GameState, PlayerState, YieldSnapshot};
 
 /// Number of players returned per `get_players` page.
 const PAGE_SIZE: u32 = 50;
 
-/// Arena contract — manages round lifecycle, player choices, and elimination logic.
+/// Arena contract � manages round lifecycle, player choices, and elimination logic.
 ///
 /// Implementation is open for contribution. See the issue tracker for:
-/// - Round state machine (OPEN → CLOSED → RESOLVED → SETTLED)
+/// - Round state machine (OPEN ? CLOSED ? RESOLVED ? SETTLED)
 /// - Commit-reveal choice submission
 /// - Minority-wins elimination logic
 /// - Admin controls and upgrade timelock
@@ -27,6 +28,36 @@ pub struct ArenaContract;
 
 #[contractimpl]
 impl ArenaContract {
+    /// Initialise the arena with configuration.
+    ///
+    /// Must be called once by the admin before any other function.
+    /// Sets `stake_token`, `yield_vault`, and `entry_fee` for the arena lifetime.
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        stake_token: Address,
+        yield_vault: Address,
+        entry_fee: i128,
+    ) -> Result<(), ArenaError> {
+        admin.require_auth();
+
+        let config = ArenaConfig {
+            admin,
+            stake_token,
+            yield_vault,
+            entry_fee,
+            state: GameState::Open,
+            player_count: 0,
+            commit_deadline: u64::MAX,
+            round_count: 0,
+        };
+        ArenaStorage::save_config(&env, &config);
+
+        env.events()
+            .publish((soroban_sdk::symbol_short!("init"),), ());
+        Ok(())
+    }
+
     /// Cancel an open arena and refund all joined players their entry fee.
     ///
     /// Only callable by the arena admin, and only while the game is still in
@@ -39,16 +70,23 @@ impl ArenaContract {
         config.admin.require_auth();
 
         // Guard: cannot cancel a game that has already started. The legal
-        // Open → Cancelled transition is enforced by the state machine module.
+        // Open ? Cancelled transition is enforced by the state machine module.
         state_machine::ensure_state(
             &config.state,
             &GameState::Open,
             ArenaError::CannotCancelStartedGame,
         )?;
 
-        // Transition state first — reentrancy protection
+        // Transition state first � reentrancy protection
         config.state = GameState::Cancelled;
         ArenaStorage::save_config(&env, &config);
+
+        // Withdraw all funds from RWA vault if any players have joined
+        let arena_addr = env.current_contract_address();
+        if config.player_count > 0 {
+            let rwa_client = RwaAdapterClient::new(&env, &config.yield_vault);
+            let _ = rwa_client.withdraw_all(&arena_addr);
+        }
 
         // Refund every joined player
         let token_client = token::TokenClient::new(&env, &config.stake_token);
@@ -135,6 +173,44 @@ impl ArenaContract {
         Ok(())
     }
 
+    /// Join an open arena by staking the entry fee.
+    ///
+    /// Transfers `entry_fee` of `stake_token` from the player to the arena
+    /// contract, then immediately deposits the stake into the RWA yield vault
+    /// via the configured adapter contract.
+    pub fn join(env: Env, player: Address) -> Result<(), ArenaError> {
+        player.require_auth();
+
+        let config = ArenaStorage::load_config(&env)?;
+
+        if config.state != GameState::Open {
+            return Err(ArenaError::CannotCancelStartedGame);
+        }
+
+        if ArenaStorage::load_player(&env, &player).is_some() {
+            return Err(ArenaError::AlreadyJoined);
+        }
+
+        let token_client = token::TokenClient::new(&env, &config.stake_token);
+        let arena_addr = env.current_contract_address();
+        token_client.transfer(&player, &arena_addr, &config.entry_fee);
+
+        arena_addr.require_auth();
+        token_client.transfer(&arena_addr, &config.yield_vault, &config.entry_fee);
+
+        let rwa_client = RwaAdapterClient::new(&env, &config.yield_vault);
+        let _ = rwa_client.deposit(&arena_addr, &config.entry_fee);
+
+        ArenaStorage::add_player(&env, &player);
+
+        env.events().publish(
+            (soroban_sdk::symbol_short!("joined"), player),
+            config.entry_fee,
+        );
+
+        Ok(())
+    }
+
     /// Returns a paginated list of all players with their current state.
     ///
     /// `page` is 0-indexed; the page size is [`PAGE_SIZE`] (50). Players are
@@ -193,7 +269,7 @@ impl ArenaContract {
     /// Resolve the current round, enforcing the on-chain timelock (#689).
     ///
     /// Rejects with [`ArenaError::GracePeriodNotElapsed`] unless at least
-    /// `duration_seconds` have passed since the round started — so an admin
+    /// `duration_seconds` have passed since the round started � so an admin
     /// cannot resolve a round before players have had the window to act.
     pub fn resolve_round(env: Env) -> Result<(), ArenaError> {
         let mut config = ArenaStorage::load_config(&env)?;
@@ -217,6 +293,53 @@ impl ArenaContract {
             .publish((soroban_sdk::symbol_short!("resolved"),), ());
         Ok(())
     }
+
+    /// Claim winnings including principal and yield.
+    ///
+    /// Callable by the winner after the round is resolved. Withdraws all
+    /// deposited funds plus accrued yield from the RWA vault, then transfers
+    /// the total to the winner. Records a yield snapshot for the round.
+    pub fn claim(env: Env, winner: Address) -> Result<(), ArenaError> {
+        winner.require_auth();
+
+        let mut config = ArenaStorage::load_config(&env)?;
+
+        if config.state != GameState::Finished {
+            return Err(ArenaError::RoundNotActive);
+        }
+
+        // Withdraw principal + yield from RWA vault
+        let arena_addr = env.current_contract_address();
+        let rwa_client = RwaAdapterClient::new(&env, &config.yield_vault);
+        let total = rwa_client.withdraw_all(&arena_addr);
+
+        let principal = config.entry_fee * i128::from(config.player_count);
+        let yield_amount = total - principal;
+        let snapshot = YieldSnapshot {
+            round: config.round_count,
+            total_deposited: principal,
+            total_yield: yield_amount,
+        };
+        ArenaStorage::save_yield_snapshot(&env, config.round_count, &snapshot);
+
+        arena_addr.require_auth();
+        let token_client = token::TokenClient::new(&env, &config.stake_token);
+        token_client.transfer(&arena_addr, &winner, &total);
+
+        config.state = GameState::Settled;
+        ArenaStorage::save_config(&env, &config);
+
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("claimed"),
+                winner,
+                total,
+                yield_amount,
+            ),
+            (),
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -238,6 +361,8 @@ mod test {
                 state: GameState::Open,
                 player_count: 0,
                 commit_deadline: u64::MAX,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
             };
             ArenaStorage::save_config(&env, &config);
             for _ in 0..n {
@@ -325,6 +450,8 @@ mod test {
                 state: GameState::Open,
                 player_count: 0,
                 commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::save_commitment(&env, &player, &commitment);
@@ -356,6 +483,8 @@ mod test {
                 state: GameState::Open,
                 player_count: 0,
                 commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::save_commitment(&env, &player, &commitment);
@@ -383,6 +512,8 @@ mod test {
                 state: GameState::Open,
                 player_count: 0,
                 commit_deadline: 1,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::save_commitment(&env, &player, &commitment);
@@ -411,6 +542,8 @@ mod test {
                 state: GameState::Open,
                 player_count: 0,
                 commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::save_commitment(&env, &player, &commitment);
@@ -440,6 +573,8 @@ mod test {
                 state: GameState::Open,
                 player_count: 0,
                 commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
             };
             ArenaStorage::save_config(&env, &config);
         });
@@ -449,7 +584,7 @@ mod test {
         assert!(result.is_err());
     }
 
-    // ── #689: admin timelock on resolve_round ──────────────────────────────
+    // -- #689: admin timelock on resolve_round ------------------------------
 
     fn setup_started(duration: u64, start_ts: u64) -> (Env, ArenaContractClient<'static>) {
         let env = Env::default();
@@ -463,6 +598,8 @@ mod test {
                 state: GameState::Open,
                 player_count: 0,
                 commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
             };
             ArenaStorage::save_config(&env, &config);
         });
@@ -482,7 +619,7 @@ mod test {
         // Only 30s have passed; the 60s grace window has not elapsed.
         env.ledger().with_mut(|li| li.timestamp = 1_030);
         assert!(client.try_resolve_round().is_err());
-        // State is unchanged — still Active.
+        // State is unchanged � still Active.
         assert_eq!(state_of(&env, &client), GameState::Active);
     }
 
@@ -508,11 +645,13 @@ mod test {
                 state: GameState::Open,
                 player_count: 0,
                 commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
             };
             ArenaStorage::save_config(&env, &config);
         });
         let client = ArenaContractClient::new(&env, &contract_id);
-        // Never started → not Active → rejected.
+        // Never started ? not Active ? rejected.
         assert!(client.try_resolve_round().is_err());
     }
 }

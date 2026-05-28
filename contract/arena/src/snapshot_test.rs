@@ -33,6 +33,8 @@ mod snapshot_tests {
             admin: Address::generate(&env), stake_token: Address::generate(&env),
             entry_fee: 100, state: GameState::Open, player_count: 42,
             commit_deadline: 1730000000,
+            yield_vault: Address::generate(&env),
+            round_count: 0,
         };
         assert!(to_xdr(&env, config).len() > 0);
     }
