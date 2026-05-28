@@ -44,6 +44,19 @@ export interface RoundResolution {
   poolBalances: Record<string, number>;
 }
 
+export interface RoundMetadata {
+  playerChoices: PlayerChoice[];
+  oracleYield: number;
+  randomSeed?: string;
+  resolution?: RoundResolution;
+}
+
+export interface PaginatedResult<T> {
+  items: T[];
+  cursor: string | null;
+  hasMore: boolean;
+}
+
 export interface RoundData {
   id: string;
   arenaId: string;
@@ -53,6 +66,7 @@ export interface RoundData {
   oracleYield?: number;
   randomSeed?: string;
   resolution?: RoundResolution;
+  metadata?: RoundMetadata;
   createdAt: Date;
   updatedAt: Date;
 }

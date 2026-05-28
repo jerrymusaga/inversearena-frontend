@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { ErrorBoundary } from "@/components/error-boundary/ErrorBoundary";
+import { ErrorFallback } from "@/components/error-boundary/ErrorFallback";
 import {
   Timer,
   ChoiceCard,
@@ -12,6 +14,7 @@ import {
 } from "@/components/arena/core";
 import { useWallet } from "@/shared-d/hooks/useWallet";
 import { TransactionModal } from "@/components/modals/TransactionModal";
+import { ArenaStatsSkeleton } from "@/components/arena/ArenaStatsSkeleton";
 import {
   buildJoinArenaTransaction,
   buildSubmitChoiceTransaction,
@@ -21,6 +24,14 @@ import {
 } from "@/shared-d/utils/stellar-transactions";
 
 export default function ArenaPage() {
+  return (
+    <ErrorBoundary fallback={<ErrorFallback context="arena" />}>
+      <ArenaGameView />
+    </ErrorBoundary>
+  );
+}
+
+function ArenaGameView() {
   const { isConnected, address, connect, signTransaction, refreshBalance } = useWallet();
   const [selectedChoice, setSelectedChoice] = useState<"heads" | "tails" | null>(null);
   const [isJoined, setIsJoined] = useState(false);
@@ -193,6 +204,10 @@ export default function ArenaPage() {
 
           {/* Right column - Stats */}
           <div className="space-y-4">
+            {isLoadingArena ? (
+              <ArenaStatsSkeleton />
+            ) : (
+            <>
             <TotalYieldPot amount={42850.12} apr={12.4} />
 
             {/* Survivors placeholder */}
@@ -275,6 +290,8 @@ export default function ArenaPage() {
                 )}
               </div>
             </div>
+            </>
+            )}
           </div>
         </div>
 

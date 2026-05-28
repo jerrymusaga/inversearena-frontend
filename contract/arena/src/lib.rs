@@ -1,19 +1,23 @@
 #![no_std]
-use soroban_sdk::{Address, Env, Vec, contract, contractimpl, token};
+use soroban_sdk::{Address, Bytes, BytesN, Env, Vec, contract, contractimpl, token};
 
+mod eliminations;
+mod oracle;
+mod snapshot_test;
+mod state_machine;
 mod storage;
 mod types;
 
+use rwa_adapter::RwaAdapterClient;
 use storage::ArenaStorage;
-use types::{ArenaConfig, ArenaError, GameState, PendingAdmin, PlayerState};
 
 /// Number of players returned per `get_players` page.
 const PAGE_SIZE: u32 = 50;
 
-/// Arena contract — manages round lifecycle, player choices, and elimination logic.
+/// Arena contract � manages round lifecycle, player choices, and elimination logic.
 ///
 /// Implementation is open for contribution. See the issue tracker for:
-/// - Round state machine (OPEN → CLOSED → RESOLVED → SETTLED)
+/// - Round state machine (OPEN ? CLOSED ? RESOLVED ? SETTLED)
 /// - Commit-reveal choice submission
 /// - Minority-wins elimination logic
 /// - Admin controls and upgrade timelock
@@ -24,25 +28,17 @@ pub struct ArenaContract;
 
 #[contractimpl]
 impl ArenaContract {
-    /// Initialise the arena with the given configuration.
-    ///
-    /// The caller becomes the initial admin. Can only be called once.
+
     pub fn initialize(
         env: Env,
         admin: Address,
         stake_token: Address,
-        entry_fee: i128,
-    ) -> Result<(), ArenaError> {
-        if ArenaStorage::has_config(&env) {
-            return Err(ArenaError::AlreadyInitialised);
-        }
+
 
         let config = ArenaConfig {
             admin,
             stake_token,
-            entry_fee,
-            state: GameState::Open,
-            player_count: 0,
+
         };
         ArenaStorage::save_config(&env, &config);
 
@@ -63,14 +59,24 @@ impl ArenaContract {
         // Require the caller to be the registered admin
         config.admin.require_auth();
 
-        // Guard: cannot cancel a game that has already started
-        if config.state != GameState::Open {
-            return Err(ArenaError::CannotCancelStartedGame);
-        }
+        // Guard: cannot cancel a game that has already started. The legal
+        // Open ? Cancelled transition is enforced by the state machine module.
+        state_machine::ensure_state(
+            &config.state,
+            &GameState::Open,
+            ArenaError::CannotCancelStartedGame,
+        )?;
 
-        // Transition state first — reentrancy protection
+        // Transition state first � reentrancy protection
         config.state = GameState::Cancelled;
         ArenaStorage::save_config(&env, &config);
+
+        // Withdraw all funds from RWA vault if any players have joined
+        let arena_addr = env.current_contract_address();
+        if config.player_count > 0 {
+            let rwa_client = RwaAdapterClient::new(&env, &config.yield_vault);
+            let _ = rwa_client.withdraw_all(&arena_addr);
+        }
 
         // Refund every joined player
         let token_client = token::TokenClient::new(&env, &config.stake_token);
@@ -90,83 +96,17 @@ impl ArenaContract {
         Ok(())
     }
 
-    /// Propose transferring admin to a new address.
-    ///
-    /// The current admin initiates the transfer. The new admin must call
-    /// `accept_admin` to finalise. If a transfer is already pending, this
-    /// returns `TransferInProgress`.
-    pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), ArenaError> {
-        let config = ArenaStorage::load_config(&env)?;
 
-        // Require the caller to be the current admin
-        config.admin.require_auth();
-
-        // Cannot transfer to the same address
-        if new_admin == config.admin {
-            return Err(ArenaError::CannotTransferToSelf);
-        }
-
-        // Guard: no pending transfer already in-flight
-        if ArenaStorage::load_pending_admin(&env).is_some() {
-            return Err(ArenaError::TransferInProgress);
-        }
-
-        ArenaStorage::save_pending_admin(
-            &env,
-            &PendingAdmin {
-                new_admin: new_admin.clone(),
-            },
-        );
-
-        env.events().publish(
-            (soroban_sdk::symbol_short!("prop_adm"),),
-            (config.admin, new_admin),
-        );
 
         Ok(())
     }
 
-    /// Accept a pending admin transfer.
-    ///
-    /// Only the proposed new admin can call this. On success, the pending
-    /// transfer is cleared and the caller becomes the admin.
-    pub fn accept_admin(env: Env) -> Result<(), ArenaError> {
-        let pending = ArenaStorage::load_pending_admin(&env)
-            .ok_or(ArenaError::NoPendingTransfer)?;
 
-        // Require the caller to be the proposed new admin
-        pending.new_admin.require_auth();
-
-        let mut config = ArenaStorage::load_config(&env)?;
-        config.admin = pending.new_admin.clone();
-        ArenaStorage::save_config(&env, &config);
-        ArenaStorage::clear_pending_admin(&env);
-
-        env.events().publish(
-            (soroban_sdk::symbol_short!("adm_chg"),),
-            pending.new_admin,
-        );
 
         Ok(())
     }
 
-    /// Cancel a pending admin transfer.
-    ///
-    /// Only the current admin can cancel a pending proposal.
-    pub fn cancel_admin_transfer(env: Env) -> Result<(), ArenaError> {
-        let config = ArenaStorage::load_config(&env)?;
 
-        // Require the caller to be the current admin
-        config.admin.require_auth();
-
-        if ArenaStorage::load_pending_admin(&env).is_none() {
-            return Err(ArenaError::NoPendingTransfer);
-        }
-
-        ArenaStorage::clear_pending_admin(&env);
-
-        env.events()
-            .publish((soroban_sdk::symbol_short!("can_adm"),), ());
 
         Ok(())
     }
@@ -202,18 +142,133 @@ impl ArenaContract {
             .map(|c| c.player_count)
             .unwrap_or(0)
     }
+
+    /// Start a round, opening the submission window (#689).
+    ///
+    /// Records the round start timestamp and the minimum grace period
+    /// (`duration_seconds`) that must elapse before [`resolve_round`] can be
+    /// called. Only the admin may start a round, and only from `Open`.
+    pub fn start_round(env: Env, duration_seconds: u64) -> Result<(), ArenaError> {
+        let mut config = ArenaStorage::load_config(&env)?;
+        config.admin.require_auth();
+
+        if config.state != GameState::Open {
+            return Err(ArenaError::CannotCancelStartedGame);
+        }
+
+        config.state = GameState::Active;
+        ArenaStorage::save_config(&env, &config);
+        ArenaStorage::save_round_start(&env, env.ledger().timestamp());
+        ArenaStorage::save_round_duration(&env, duration_seconds);
+
+        env.events()
+            .publish((soroban_sdk::symbol_short!("started"),), duration_seconds);
+        Ok(())
+    }
+
+    /// Resolve the current round, enforcing the on-chain timelock (#689).
+    ///
+    /// Rejects with [`ArenaError::GracePeriodNotElapsed`] unless at least
+    /// `duration_seconds` have passed since the round started � so an admin
+    /// cannot resolve a round before players have had the window to act.
+    pub fn resolve_round(env: Env) -> Result<(), ArenaError> {
+        let mut config = ArenaStorage::load_config(&env)?;
+        config.admin.require_auth();
+
+        if config.state != GameState::Active {
+            return Err(ArenaError::RoundNotActive);
+        }
+
+        let round_start =
+            ArenaStorage::load_round_start(&env).ok_or(ArenaError::RoundNotStarted)?;
+        let grace = ArenaStorage::load_round_duration(&env);
+        if env.ledger().timestamp() < round_start.saturating_add(grace) {
+            return Err(ArenaError::GracePeriodNotElapsed);
+        }
+
+        // Fetch the current yield rate from the on-chain oracle. Defaults to
+        // 0 bps if the oracle is unavailable — liveness over precision.
+        let yield_bps = oracle::fetch_yield_bps(&env, &config.oracle_contract);
+        ArenaStorage::save_round_yield_bps(&env, config.round_count, yield_bps);
+
+        config.state = GameState::Finished;
+        ArenaStorage::save_config(&env, &config);
+
+        env.events()
+            .publish((soroban_sdk::symbol_short!("resolved"),), yield_bps);
+        Ok(())
+    }
+
+    /// Claim winnings including principal and yield.
+    ///
+    /// Callable by the winner after the round is resolved. Withdraws all
+    /// deposited funds plus accrued yield from the RWA vault, then transfers
+    /// the total to the winner. Records a yield snapshot for the round.
+    pub fn claim(env: Env, winner: Address) -> Result<(), ArenaError> {
+        winner.require_auth();
+
+        let mut config = ArenaStorage::load_config(&env)?;
+
+        if config.state != GameState::Finished {
+            return Err(ArenaError::RoundNotActive);
+        }
+
+        // Withdraw principal + yield from RWA vault
+        let arena_addr = env.current_contract_address();
+        let rwa_client = RwaAdapterClient::new(&env, &config.yield_vault);
+        let total = rwa_client.withdraw_all(&arena_addr);
+
+        let principal = config.entry_fee * i128::from(config.player_count);
+        let yield_amount = total - principal;
+        let snapshot = YieldSnapshot {
+            round: config.round_count,
+            total_deposited: principal,
+            total_yield: yield_amount,
+        };
+        ArenaStorage::save_yield_snapshot(&env, config.round_count, &snapshot);
+
+        arena_addr.require_auth();
+        let token_client = token::TokenClient::new(&env, &config.stake_token);
+        token_client.transfer(&arena_addr, &winner, &total);
+
+        config.state = GameState::Settled;
+        ArenaStorage::save_config(&env, &config);
+
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("claimed"),
+                winner,
+                total,
+                yield_amount,
+            ),
+            (),
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::types::ArenaConfig;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{contract, contractimpl, testutils::{Address as _, Ledger as _}};
+
+    /// Minimal mock oracle that always returns 0 bps — enough for resolve_round tests.
+    #[contract]
+    struct MockOracle;
+
+    #[contractimpl]
+    impl MockOracle {
+        pub fn get_current_yield_bps(_env: Env) -> u32 {
+            0
+        }
+    }
 
     /// Register the contract and seed `n` joined players, returning the client.
     fn setup(n: u32) -> (Env, ArenaContractClient<'static>) {
         let env = Env::default();
         let contract_id = env.register(ArenaContract, ());
+        let oracle_id = env.register(MockOracle, ());
 
         env.as_contract(&contract_id, || {
             let config = ArenaConfig {
@@ -222,6 +277,10 @@ mod test {
                 entry_fee: 100,
                 state: GameState::Open,
                 player_count: 0,
+                commit_deadline: u64::MAX,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
+                oracle_contract: oracle_id,
             };
             ArenaStorage::save_config(&env, &config);
             for _ in 0..n {
@@ -279,5 +338,246 @@ mod test {
 
         // The two pages together cover every player exactly once.
         assert_eq!(page0.len() + page1.len(), client.player_count());
+    }
+
+    fn compute_commitment(env: &Env, choice: Choice, salt: &BytesN<32>) -> BytesN<32> {
+        let mut preimage = Bytes::new(env);
+        preimage.push_back(choice.to_byte());
+        let salt_bytes = salt.to_array();
+        for b in salt_bytes.iter() {
+            preimage.push_back(*b);
+        }
+        env.crypto().sha256(&preimage).into()
+    }
+
+    #[test]
+    fn valid_commit_and_reveal() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let player = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[42u8; 32]);
+        let choice = Choice::Tails;
+        let commitment = compute_commitment(&env, choice, &salt);
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: Address::generate(&env),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
+                oracle_contract: Address::generate(&env),
+            };
+            ArenaStorage::save_config(&env, &config);
+            ArenaStorage::save_commitment(&env, &player, &commitment);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        client.reveal_choice(&player, &choice, &salt);
+
+        env.as_contract(&contract_id, || {
+            let stored = ArenaStorage::load_choice(&env, &player).unwrap();
+            assert_eq!(stored, choice);
+        });
+    }
+
+    #[test]
+    fn reveal_hash_mismatch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let player = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[7u8; 32]);
+        let commitment = compute_commitment(&env, Choice::Heads, &salt);
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: Address::generate(&env),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
+                oracle_contract: Address::generate(&env),
+            };
+            ArenaStorage::save_config(&env, &config);
+            ArenaStorage::save_commitment(&env, &player, &commitment);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        let result = client.try_reveal_choice(&player, &Choice::Tails, &salt);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reveal_before_deadline_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let player = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[3u8; 32]);
+        let commitment = compute_commitment(&env, Choice::Heads, &salt);
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: Address::generate(&env),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 1,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
+                oracle_contract: Address::generate(&env),
+            };
+            ArenaStorage::save_config(&env, &config);
+            ArenaStorage::save_commitment(&env, &player, &commitment);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        let result = client.try_reveal_choice(&player, &Choice::Heads, &salt);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn double_reveal_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let player = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[9u8; 32]);
+        let choice = Choice::Heads;
+        let commitment = compute_commitment(&env, choice, &salt);
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: Address::generate(&env),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
+                oracle_contract: Address::generate(&env),
+            };
+            ArenaStorage::save_config(&env, &config);
+            ArenaStorage::save_commitment(&env, &player, &commitment);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+
+        client.reveal_choice(&player, &choice, &salt);
+
+        let result = client.try_reveal_choice(&player, &choice, &salt);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reveal_without_commitment_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let player = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[5u8; 32]);
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: Address::generate(&env),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
+                oracle_contract: Address::generate(&env),
+            };
+            ArenaStorage::save_config(&env, &config);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        let result = client.try_reveal_choice(&player, &Choice::Heads, &salt);
+        assert!(result.is_err());
+    }
+
+    // -- #689: admin timelock on resolve_round ------------------------------
+
+    fn setup_started(duration: u64, start_ts: u64) -> (Env, ArenaContractClient<'static>) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let oracle_id = env.register(MockOracle, ());
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: Address::generate(&env),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
+                oracle_contract: oracle_id,
+            };
+            ArenaStorage::save_config(&env, &config);
+        });
+        let client = ArenaContractClient::new(&env, &contract_id);
+        env.ledger().with_mut(|li| li.timestamp = start_ts);
+        client.start_round(&duration);
+        (env, client)
+    }
+
+    fn state_of(env: &Env, client: &ArenaContractClient) -> GameState {
+        env.as_contract(&client.address, || ArenaStorage::load_config(env).unwrap().state)
+    }
+
+    #[test]
+    fn resolve_round_before_grace_elapsed_fails() {
+        let (env, client) = setup_started(60, 1_000);
+        // Only 30s have passed; the 60s grace window has not elapsed.
+        env.ledger().with_mut(|li| li.timestamp = 1_030);
+        assert!(client.try_resolve_round().is_err());
+        // State is unchanged � still Active.
+        assert_eq!(state_of(&env, &client), GameState::Active);
+    }
+
+    #[test]
+    fn resolve_round_after_grace_elapsed_succeeds() {
+        let (env, client) = setup_started(60, 1_000);
+        // Past the grace window.
+        env.ledger().with_mut(|li| li.timestamp = 1_061);
+        client.resolve_round();
+        assert_eq!(state_of(&env, &client), GameState::Finished);
+    }
+
+    #[test]
+    fn resolve_round_requires_an_active_round() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: Address::generate(&env),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
+                oracle_contract: Address::generate(&env),
+            };
+            ArenaStorage::save_config(&env, &config);
+        });
+        let client = ArenaContractClient::new(&env, &contract_id);
+        // Never started ? not Active ? rejected.
+        assert!(client.try_resolve_round().is_err());
     }
 }

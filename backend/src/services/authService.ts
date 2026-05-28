@@ -101,16 +101,17 @@ export class AuthService {
 
     const tokens = await this.issueTokenPair(user._id.toString(), walletAddress);
 
-    return {
-      ...tokens,
-      user: {
-        id: user._id.toString(),
-        walletAddress: user.walletAddress,
-        displayName: user.displayName,
-        joinedAt: user.joinedAt,
-        lastLoginAt: user.lastLoginAt,
-      },
+    const authUser: AuthUser = {
+      id: user._id.toString(),
+      walletAddress: user.walletAddress,
+      joinedAt: user.joinedAt,
+      lastLoginAt: user.lastLoginAt,
+      ...(user.displayName !== undefined && user.displayName !== null
+        ? { displayName: user.displayName }
+        : {}),
     };
+
+    return { ...tokens, user: authUser };
   }
 
   async refreshTokens(refreshToken: string): Promise<TokenPair> {
@@ -194,32 +195,7 @@ export class AuthService {
     const accessPayload: JwtPayload = { sub: userId, wallet: walletAddress, type: "access" };
     const refreshPayload: JwtPayload = { sub: userId, wallet: walletAddress, type: "refresh" };
 
-    const accessToken = jwt.sign(accessPayload, secret, {
-      expiresIn: (process.env.JWT_EXPIRES_IN ?? "15m") as jwt.SignOptions["expiresIn"],
-    });
 
-    const refreshExpiresIn = (process.env.JWT_REFRESH_EXPIRES_IN ?? "7d") as jwt.SignOptions["expiresIn"];
-    const refreshToken = jwt.sign(refreshPayload, secret, {
-      expiresIn: refreshExpiresIn,
-    });
-
-    // Compute expiry date for the stored record
-    const ttlSec = typeof refreshExpiresIn === "string"
-      ? parseDuration(refreshExpiresIn)
-      : (refreshExpiresIn as number);
-    const expiresAt = new Date(Date.now() + ttlSec * 1000);
-
-    const familyId = existingFamilyId ?? randomUUID();
-
-    // Store the hashed refresh token
-    await RefreshTokenModel.create({
-      tokenHash: hashToken(refreshToken),
-      familyId,
-      userId,
-      used: false,
-      revoked: false,
-      expiresAt,
-    });
 
     return { accessToken, refreshToken };
   }

@@ -1,13 +1,16 @@
 #![allow(dead_code)]
-use crate::types::{ArenaConfig, ArenaError, PendingAdmin, PlayerState};
-use soroban_sdk::{Address, Env, Vec, contracttype, symbol_short};
+
 
 const PENDING_ADMIN_KEY: &str = "PENDING_ADMIN";
 
-/// Storage key for an individual player's state, keyed by their address.
+/// Storage key for per-player data, keyed by the player's address.
 #[contracttype]
 enum DataKey {
     Player(Address),
+    Commitment(Address),
+    Choice(Address),
+    YieldSnapshot(u32),
+    RoundYieldBps(u32),
 }
 
 pub struct ArenaStorage;
@@ -26,8 +29,7 @@ impl ArenaStorage {
             .set(&symbol_short!("CONFIG"), config);
     }
 
-    pub fn has_config(env: &Env) -> bool {
-        env.storage().persistent().has(&symbol_short!("CONFIG"))
+
     }
 
     /// Return the list of all player addresses that have joined this arena.
@@ -80,23 +82,7 @@ impl ArenaStorage {
             .set(&DataKey::Player(player.clone()), state);
     }
 
-    /// Load the pending admin transfer, if one exists.
-    pub fn load_pending_admin(env: &Env) -> Option<PendingAdmin> {
-        env.storage()
-            .persistent()
-            .get(&symbol_short!("PADMIN"))
-    }
 
-    /// Save a pending admin transfer proposal.
-    pub fn save_pending_admin(env: &Env, pending: &PendingAdmin) {
-        env.storage()
-            .persistent()
-            .set(&symbol_short!("PADMIN"), pending);
-    }
-
-    /// Remove the pending admin transfer proposal.
-    pub fn clear_pending_admin(env: &Env) {
-        env.storage().persistent().remove(&symbol_short!("PADMIN"));
     }
 }
 
