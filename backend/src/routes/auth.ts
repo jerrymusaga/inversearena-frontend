@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { asyncHandler } from "../middleware/validate";
+import { createRateLimitMiddleware, nonceRateLimitConfig } from "../middleware/rateLimit";
 import type { AuthController } from "../controllers/auth.controller";
 import type { RequestHandler } from "express";
 
@@ -9,8 +10,10 @@ export function createAuthRouter(
 ): Router {
   const router = Router();
 
+  const nonceRateLimiter = createRateLimitMiddleware(nonceRateLimitConfig);
+
   // Public endpoints
-  router.post("/nonce", asyncHandler(controller.requestNonce));
+  router.post("/nonce", nonceRateLimiter, asyncHandler(controller.requestNonce));
   router.post("/verify", asyncHandler(controller.verify));
   router.post("/refresh", asyncHandler(controller.refresh));
 

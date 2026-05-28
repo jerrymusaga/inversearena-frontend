@@ -1,765 +1,253 @@
 #![no_std]
+use soroban_sdk::{Address, BytesN, Env, contract, contractimpl, symbol_short, token};
 
-use soroban_sdk::{
-    Address, BytesN, Env, IntoVal, String, Symbol, contract, contracterror, contractimpl,
-    contracttype, symbol_short, xdr::ToXdr,
-};
+mod storage;
+mod types;
 
-#[cfg(test)]
-use arena::ArenaContract;
+use storage::FactoryStorage;
+use types::FactoryError;
 
-// ── Storage keys ─────────────────────────────────────────────────────────────
-
-const ADMIN_KEY: Symbol = symbol_short!("ADMIN");
-const PENDING_HASH_KEY: Symbol = symbol_short!("P_HASH");
-const EXECUTE_AFTER_KEY: Symbol = symbol_short!("P_AFTER");
-const WHITELIST_PREFIX: Symbol = symbol_short!("WL");
-const MIN_STAKE_KEY: Symbol = symbol_short!("MIN_STK");
-const ARENA_WASM_HASH_KEY: Symbol = symbol_short!("AR_WASM");
-const POOL_COUNT_KEY: Symbol = symbol_short!("P_CNT");
-const SCHEMA_VERSION_KEY: Symbol = symbol_short!("S_VER");
-const PAUSED_KEY: Symbol = symbol_short!("PAUSED");
-
-/// Current schema version. Bump this when storage layout changes.
-const CURRENT_SCHEMA_VERSION: u32 = 1;
-
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct ArenaMetadata {
-    pub pool_id: u32,
-    pub creator: Address,
-    pub capacity: u32,
-    pub stake_amount: i128,
-}
-
-// ── Capacity limits ───────────────────────────────────────────────────────────
-
-const MAX_POOL_CAPACITY: u32 = 256;
-const MAX_PAGE_SIZE: u32 = 50;
-
-#[contracttype]
-#[derive(Clone)]
-pub enum DataKey {
-    SupportedToken(Address),
-    Pool(u32),
-}
-
-// ── Timelock constant: 48 hours in seconds ────────────────────────────────────
-
-const TIMELOCK_PERIOD: u64 = 48 * 60 * 60;
-
-// ── Minimum stake: 10 XLM in stroops ──────────────────────────────────────────
-
-const DEFAULT_MIN_STAKE: i128 = 10_000_000;
-
-// ── Event topics ──────────────────────────────────────────────────────────────
-
-const TOPIC_UPGRADE_PROPOSED: Symbol = symbol_short!("UP_PROP");
-const TOPIC_UPGRADE_EXECUTED: Symbol = symbol_short!("UP_EXEC");
-const TOPIC_UPGRADE_CANCELLED: Symbol = symbol_short!("UP_CANC");
-const TOPIC_POOL_CREATED: Symbol = symbol_short!("POOL_CRE");
-const TOPIC_HOST_WHITELISTED: Symbol = symbol_short!("WL_ADD");
-const TOPIC_HOST_REMOVED: Symbol = symbol_short!("WL_REM");
-const TOPIC_ADMIN_CHANGED: Symbol = symbol_short!("ADM_CHG");
-const TOPIC_WASM_UPDATED: Symbol = symbol_short!("WASM_UP");
-const TOPIC_TOKEN_ADDED: Symbol = symbol_short!("TOK_ADD");
-const TOPIC_TOKEN_REMOVED: Symbol = symbol_short!("TOK_REM");
-const TOPIC_MIN_STAKE_UPDATED: Symbol = symbol_short!("MIN_UP");
-const TOPIC_PAUSED: Symbol = symbol_short!("PAUSED");
-const TOPIC_UNPAUSED: Symbol = symbol_short!("UNPAUSED");
-
-/// Event payload version. Include in every event data tuple so consumers
-/// can detect schema changes without re-deploying indexers.
-const EVENT_VERSION: u32 = 1;
-
-// ── Error codes ───────────────────────────────────────────────────────────────
-//
-// All public write entrypoints return `Result<_, Error>` so callers receive a
-// machine-readable error code instead of an opaque panic string. This makes
-// client-side error handling deterministic and testable.
-
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum Error {
-    /// Contract has not been initialised yet.
-    NotInitialized = 1,
-    /// Contract was already initialised; `initialize` may only be called once.
-    AlreadyInitialized = 2,
-    /// Caller lacks permission for this operation.
-    Unauthorized = 3,
-    /// `execute_upgrade` or `cancel_upgrade` called without a pending proposal.
-    NoPendingUpgrade = 4,
-    /// `execute_upgrade` called before the 48-hour timelock has elapsed.
-    TimelockNotExpired = 5,
-    /// Provided stake is non-zero but below the configured minimum.
-    StakeBelowMinimum = 6,
-    /// Caller is not on the host whitelist.
-    HostNotWhitelisted = 7,
-    /// Stake amount is zero or negative.
-    InvalidStakeAmount = 8,
-    /// A pool with the given `pool_id` was already registered.
-    PoolAlreadyExists = 9,
-    /// Pool capacity is below 2 or exceeds `MAX_POOL_CAPACITY`.
-    InvalidCapacity = 10,
-    /// `create_pool` called before `set_arena_wasm_hash` has been called.
-    WasmHashNotSet = 11,
-    /// Pending upgrade state is only partially present.
-    MalformedUpgradeState = 12,
-    /// `create_pool` called with a token that has not been added via `add_supported_token`.
-    UnsupportedToken = 13,
-    /// `propose_upgrade` called while a pending upgrade proposal already exists.
-    UpgradeAlreadyPending = 14,
-    /// Contract is paused; write operations are disabled.
-    Paused = 15,
-}
-
-// ── Contract ──────────────────────────────────────────────────────────────────
-
+/// Factory contract — deploys arena instances and enforces protocol-level rules.
+///
+/// Implementation is open for contribution. See the issue tracker for:
+/// - Pool creation with host whitelist enforcement
+/// - Arena WASM hash management
+/// - Minimum stake validation
+/// - Admin and upgrade timelock flow
+///
+/// Architecture overview: see `ARCHITECTURE.md` in the workspace root.
 #[contract]
 pub struct FactoryContract;
 
 #[contractimpl]
 impl FactoryContract {
-    /// Initialise the contract, setting the admin address.
-    /// Must be called exactly once after deployment.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `admin` - Address to designate as the contract administrator.
-    ///
-    /// # Errors
-    /// * [`Error::AlreadyInitialized`] — contract has already been initialised.
-    ///
-    /// # Authorization
-    /// Requires auth from the admin address to prevent front-running.
-    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&ADMIN_KEY) {
-            return Err(Error::AlreadyInitialized);
-        }
-
-        admin.require_auth();
-
-        env.storage().instance().set(&ADMIN_KEY, &admin);
-        env.storage()
-            .instance()
-            .set(&MIN_STAKE_KEY, &DEFAULT_MIN_STAKE);
-        env.storage()
-            .instance()
-            .set(&SCHEMA_VERSION_KEY, &CURRENT_SCHEMA_VERSION);
-        Ok(())
-    }
-
-    // ── Schema versioning ────────────────────────────────────────────────────
-
-    /// Return the persisted schema version (0 if never set).
-    pub fn schema_version(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&SCHEMA_VERSION_KEY)
-            .unwrap_or(0u32)
-    }
-
-    /// Migrate storage from the current persisted version to
-    /// `CURRENT_SCHEMA_VERSION`. Admin-only.
-    ///
-    /// Each version bump should have its own migration block inside
-    /// this function. The version is written atomically at the end so
-    /// a failed transaction leaves the old version in place.
-    ///
-    /// Calling `migrate` when already at the current version is a no-op.
-    pub fn migrate(env: Env) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-        admin.require_auth();
-
-        let stored: u32 = env
-            .storage()
-            .instance()
-            .get(&SCHEMA_VERSION_KEY)
-            .unwrap_or(0u32);
-
-        if stored >= CURRENT_SCHEMA_VERSION {
-            return Ok(()); // already up to date
-        }
-
-        // -- v0 -> v1: initial version stamp (no data changes) ------
-        // Future migrations go here as sequential if-blocks:
-        //   if stored < 2 { /* v1 -> v2 migration logic */ }
-
-        env.storage()
-            .instance()
-            .set(&SCHEMA_VERSION_KEY, &CURRENT_SCHEMA_VERSION);
-        Ok(())
-    }
-
-    /// Return the current admin address.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    ///
-    /// # Errors
-    /// * [`Error::NotInitialized`] — `initialize` has not been called.
-    ///
-    /// # Authorization
-    /// None — read-only, open to any caller.
-    pub fn admin(env: Env) -> Result<Address, Error> {
-        require_admin(&env)
-    }
-
-    /// Set a new admin address. Only the current admin can call this.
-    ///
-    /// # Errors
-    /// * [`Error::NotInitialized`] — contract not initialised.
-    pub fn set_admin(env: Env, new_admin: Address) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-        admin.require_auth();
-        env.storage().instance().set(&ADMIN_KEY, &new_admin);
-        env.events()
-            .publish((TOPIC_ADMIN_CHANGED,), (EVENT_VERSION, admin, new_admin));
-        Ok(())
-    }
-
-    /// Set the WASM hash for arena contract deployment. Admin-only.
-    ///
-    /// # Errors
-    /// * [`Error::NotInitialized`] — contract not initialised.
-    pub fn set_arena_wasm_hash(env: Env, wasm_hash: BytesN<32>) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-        admin.require_auth();
-        let previous_hash: Option<BytesN<32>> =
-            env.storage().instance().get(&ARENA_WASM_HASH_KEY);
-        env.storage()
-            .instance()
-            .set(&ARENA_WASM_HASH_KEY, &wasm_hash);
-        env.events().publish(
-            (TOPIC_WASM_UPDATED,),
-            (EVENT_VERSION, previous_hash, wasm_hash),
-        );
-        Ok(())
-    }
-
-    /// Add a host address to the whitelist. Admin-only.
-    /// Emits `HostWhitelisted(address)`.
-    ///
-    /// # Errors
-    /// * [`Error::NotInitialized`] — contract not initialised.
-    pub fn add_to_whitelist(env: Env, host: Address) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-        admin.require_auth();
-        let key = (WHITELIST_PREFIX, host.clone());
-        env.storage().instance().set(&key, &true);
-        env.events()
-            .publish((TOPIC_HOST_WHITELISTED,), (EVENT_VERSION, host));
-        Ok(())
-    }
-
-    /// Remove a host address from the whitelist. Admin-only.
-    /// Emits `HostRemoved(address)`.
-    ///
-    /// # Errors
-    /// * [`Error::NotInitialized`] — contract not initialised.
-    pub fn remove_from_whitelist(env: Env, host: Address) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-        admin.require_auth();
-        let key = (WHITELIST_PREFIX, host.clone());
-        env.storage().instance().remove(&key);
-        env.events()
-            .publish((TOPIC_HOST_REMOVED,), (EVENT_VERSION, host));
-        Ok(())
-    }
-
-    /// Check if an address is whitelisted.
-    ///
-    /// # Errors
-    /// * [`Error::NotInitialized`] — contract not initialised.
-    pub fn is_whitelisted(env: Env, host: Address) -> Result<bool, Error> {
-        let key = (WHITELIST_PREFIX, host);
-        Ok(env.storage().instance().get(&key).unwrap_or(false))
-    }
-
-    /// Set the minimum stake amount. Admin-only.
-    ///
-    /// # Errors
-    /// * [`Error::NotInitialized`] — contract not initialised.
-    /// * [`Error::InvalidStakeAmount`] — `min_stake` is zero or negative.
-    pub fn set_min_stake(env: Env, min_stake: i128) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-        require_not_paused(&env)?;
-        admin.require_auth();
-        if min_stake <= 0 {
-            return Err(Error::InvalidStakeAmount);
-        }
-        let previous_min_stake = Self::get_min_stake(env.clone());
-        env.storage().instance().set(&MIN_STAKE_KEY, &min_stake);
-        env.events().publish(
-            (TOPIC_MIN_STAKE_UPDATED,),
-            (EVENT_VERSION, previous_min_stake, min_stake),
-        );
-        Ok(())
-    }
-
-    /// Get the minimum stake amount.
-    pub fn get_min_stake(env: Env) -> i128 {
-        env.storage()
-            .instance()
-            .get(&MIN_STAKE_KEY)
-            .unwrap_or(DEFAULT_MIN_STAKE)
-    }
-
-    /// Create a new pool (arena). Only admin or whitelisted hosts can call this.
-    ///
-    /// The caller must provide a valid stake amount >= minimum stake and a
-    /// capacity in range [2, MAX_POOL_CAPACITY]. `pool_id` must be unique.
-    /// The `currency` must have been previously approved via `add_supported_token`.
-    /// Emits `PoolCreated(pool_id, creator, capacity, stake_amount)`.
-    ///
-    /// # Errors
-    /// * [`Error::NotInitialized`] — contract not initialised.
-    /// * [`Error::UnsupportedToken`] — `currency` has not been added via `add_supported_token`.
-    /// * [`Error::Unauthorized`] — `caller` is neither admin nor whitelisted.
-    /// * [`Error::InvalidCapacity`] — `capacity` is < 2 or > `MAX_POOL_CAPACITY`.
-    /// * [`Error::InvalidStakeAmount`] — `stake_amount` is zero or negative.
-    /// * [`Error::StakeBelowMinimum`] — `stake_amount` is below the configured minimum.
-    /// * [`Error::WasmHashNotSet`] — `set_arena_wasm_hash` has not been called yet.
-    pub fn create_pool(
+    pub fn initialize(
         env: Env,
-        caller: Address,
-        stake: i128,
-        currency: Address,
-        round_speed: u32,
-        capacity: u32,
-    ) -> Result<Address, Error> {
-        let admin = require_admin(&env)?;
-        require_not_paused(&env)?;
-
-        // Prevent spoofing: the `caller` address used as `creator` must be
-        // the transaction signer (unless Soroban auth is mocked in tests).
-        caller.require_auth();
-
-        // Use invoker() for authorization check.
-        // For Soroban 20+, env.invoker() is preferred over passing Address.
-        let is_admin = caller == admin;
-        let is_whitelisted = Self::is_whitelisted(env.clone(), caller.clone())?;
-
-        if !is_admin && !is_whitelisted {
-            return Err(Error::Unauthorized);
+        admin: Address,
+        stake_token: Address,
+        min_creator_stake: i128,
+    ) -> Result<(), FactoryError> {
+        if FactoryStorage::has_admin(&env) {
+            return Err(FactoryError::AlreadyInitialized);
+        }
+        if min_creator_stake < 0 {
+            return Err(FactoryError::InvalidStakeAmount);
         }
 
-        // Reject any currency that has not been explicitly approved by the admin.
-        // This must be checked before deploying any contract to prevent pools
-        // backed by malicious or worthless tokens from ever being created.
-        if !Self::is_token_supported(env.clone(), currency.clone()) {
-            return Err(Error::UnsupportedToken);
-        }
-
-        if capacity < 2 || capacity > MAX_POOL_CAPACITY {
-            return Err(Error::InvalidCapacity);
-        }
-
-        let min_stake = Self::get_min_stake(env.clone());
-        if stake <= 0 {
-            return Err(Error::InvalidStakeAmount);
-        }
-        if stake < min_stake {
-            return Err(Error::StakeBelowMinimum);
-        }
-
-        let wasm_hash: BytesN<32> = env
-            .storage()
-            .instance()
-            .get(&ARENA_WASM_HASH_KEY)
-            .ok_or(Error::WasmHashNotSet)?;
-
-        let pool_id: u32 = env
-            .storage()
-            .instance()
-            .get(&POOL_COUNT_KEY)
-            .unwrap_or(0u32);
-
-        let metadata = ArenaMetadata {
-            pool_id,
-            creator: caller.clone(),
-            capacity,
-            stake_amount: stake,
-        };
-
-        // ── Deployment ──────────────────────────────────────────────────────────
-
-        // Create a unique salt for this deployment.
-        let mut salt_bin = soroban_sdk::Bytes::new(&env);
-        salt_bin.append(&caller.clone().to_xdr(&env));
-        salt_bin.append(&pool_id.to_xdr(&env));
-        let salt = env.crypto().sha256(&salt_bin);
-
-        // Deploy the contract.
-        #[cfg(test)]
-        let arena_address = {
-            let _ = wasm_hash; // consumed via WasmHashNotSet check above; not used in test path
-            let addr = env
-                .deployer()
-                .with_current_contract(salt)
-                .deployed_address();
-            env.register_at(&addr, ArenaContract, ());
-            addr
-        };
-
-        #[cfg(not(test))]
-        let arena_address = env.deployer().with_current_contract(salt).deploy(wasm_hash);
-
-        // ── Initialisation ──────────────────────────────────────────────────────
-
-        // Use a generic client to call init and initialize.
-        // Note: In a real implementation, you'd use the generated client from the arena contract.
-        // For simplicity here, we use invoke_contract if we don't have the client imported.
-        // However, better to assume the workspace allows cross-contract calls.
-
-        env.invoke_contract::<()>(
-            &arena_address,
-            &soroban_sdk::symbol_short!("init"),
-            soroban_sdk::vec![&env, round_speed.into_val(&env), stake.into_val(&env)],
-        );
-
-        env.invoke_contract::<()>(
-            &arena_address,
-            &soroban_sdk::Symbol::new(&env, "init_factory"),
-            soroban_sdk::vec![
-                &env,
-                env.current_contract_address().into_val(&env),
-                caller.clone().into_val(&env)
-            ],
-        );
-
-        env.invoke_contract::<()>(
-            &arena_address,
-            &soroban_sdk::Symbol::new(&env, "set_token"),
-            soroban_sdk::vec![&env, currency.into_val(&env)],
-        );
-
-        env.invoke_contract::<()>(
-            &arena_address,
-            &soroban_sdk::Symbol::new(&env, "set_capacity"),
-            soroban_sdk::vec![&env, capacity.into_val(&env)],
-        );
-
-        // 3. Transfer admin to the caller after factory-owned initialization is complete.
-        env.invoke_contract::<()>(
-            &arena_address,
-            &soroban_sdk::Symbol::new(&env, "set_admin"),
-            soroban_sdk::vec![&env, caller.into_val(&env)],
-        );
-
-        // Persist metadata only after deployment and all init calls succeed.
-        env.storage()
-            .persistent()
-            .set(&DataKey::Pool(pool_id), &metadata);
-
-        // Increment the pool counter.
-        env.storage()
-            .instance()
-            .set(&POOL_COUNT_KEY, &(pool_id + 1));
-
-        env.events().publish(
-            (TOPIC_POOL_CREATED,),
-            (
-                EVENT_VERSION,
-                pool_id,
-                caller,
-                capacity,
-                stake,
-                arena_address.clone(),
-            ),
-        );
-
-        Ok(arena_address)
+        admin.require_auth();
+        FactoryStorage::save_admin(&env, &admin);
+        FactoryStorage::save_stake_token(&env, &stake_token);
+        FactoryStorage::save_min_creator_stake(&env, min_creator_stake);
+        Ok(())
     }
 
-    /// Set human-readable metadata on a deployed arena contract.
-    ///
-    /// Forwards to the arena's `set_metadata` entrypoint.  The caller must be
-    /// the arena's admin (typically the pool creator who was set as admin during
-    /// `create_pool`).
-    ///
-    /// # Arguments
-    /// * `arena_address` — address of the deployed arena contract.
-    /// * `arena_id`      — application-level identifier stored inside the metadata.
-    /// * `name`          — display name, max 64 bytes.
-    /// * `description`   — optional description, max 256 bytes.
-    /// * `host`          — host address to record in the metadata.
-    pub fn set_arena_metadata(
+    pub fn admin(env: Env) -> Result<Address, FactoryError> {
+        FactoryStorage::load_admin(&env).ok_or(FactoryError::NotInitialized)
+    }
+
+    pub fn set_min_creator_stake(
         env: Env,
-        arena_address: Address,
-        arena_id: u64,
-        name: String,
-        description: Option<String>,
-        host: Address,
-    ) {
-        env.invoke_contract::<()>(
-            &arena_address,
-            &soroban_sdk::Symbol::new(&env, "set_metadata"),
-            soroban_sdk::vec![
-                &env,
-                arena_id.into_val(&env),
-                name.into_val(&env),
-                description.into_val(&env),
-                host.into_val(&env),
-            ],
-        );
-    }
-
-    /// Add a token to the supported currency list. Admin-only.
-    pub fn add_supported_token(env: Env, token: Address) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-        require_not_paused(&env)?;
-        admin.require_auth();
-        env.storage()
-            .instance()
-            .set(&DataKey::SupportedToken(token.clone()), &true);
-        env.events()
-            .publish((TOPIC_TOKEN_ADDED,), (EVENT_VERSION, false, true, token));
-        Ok(())
-    }
-
-    /// Remove a token from the supported currency list. Admin-only.
-    /// Any pools already created with this token are unaffected; only future
-    /// `create_pool` calls will be rejected.
-    /// Emits `TokenRemoved(token)`.
-    pub fn remove_supported_token(env: Env, token: Address) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-        require_not_paused(&env)?;
-        admin.require_auth();
-        env.storage()
-            .instance()
-            .remove(&DataKey::SupportedToken(token.clone()));
-        env.events()
-            .publish((TOPIC_TOKEN_REMOVED,), (EVENT_VERSION, token));
-        Ok(())
-    }
-
-    /// Return whether `token` is on the supported currency list.
-    pub fn is_token_supported(env: Env, token: Address) -> bool {
-        env.storage()
-            .instance()
-            .get::<_, bool>(&DataKey::SupportedToken(token))
-            .unwrap_or(false)
-    }
-
-    // ── Upgrade mechanism ────────────────────────────────────────────────────
-
-    /// Propose a WASM upgrade. The new hash is stored together with the
-    /// earliest timestamp at which `execute_upgrade` may be called.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `new_wasm_hash` - 32-byte hash of the new contract WASM to deploy.
-    ///
-    /// # Errors
-    /// * [`Error::NotInitialized`] — contract not initialised.
-    ///
-    /// # Authorization
-    /// Requires admin signature (`admin.require_auth()`).
-    ///
-    /// # Events
-    /// Emits `UpgradeProposed(new_wasm_hash, execute_after)`.
-    pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-        admin.require_auth();
-
-        if env.storage().instance().has(&PENDING_HASH_KEY) {
-            return Err(Error::UpgradeAlreadyPending);
+        admin: Address,
+        min_creator_stake: i128,
+    ) -> Result<(), FactoryError> {
+        Self::require_admin(&env, &admin)?;
+        if min_creator_stake < 0 {
+            return Err(FactoryError::InvalidStakeAmount);
         }
 
-        let execute_after: u64 = env.ledger().timestamp() + TIMELOCK_PERIOD;
-        env.storage()
-            .instance()
-            .set(&PENDING_HASH_KEY, &new_wasm_hash);
-        env.storage()
-            .instance()
-            .set(&EXECUTE_AFTER_KEY, &execute_after);
-
+        let previous = FactoryStorage::load_min_creator_stake(&env);
+        FactoryStorage::save_min_creator_stake(&env, min_creator_stake);
         env.events().publish(
-            (TOPIC_UPGRADE_PROPOSED,),
-            (EVENT_VERSION, new_wasm_hash, execute_after),
+            (symbol_short!("MIN_UP"),),
+            (previous, min_creator_stake),
         );
         Ok(())
     }
 
-    /// Execute a previously proposed upgrade after the 48-hour timelock.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    ///
-    /// # Errors
-    /// * [`Error::NotInitialized`] — contract not initialised.
-    /// * [`Error::NoPendingUpgrade`] — no upgrade proposal exists.
-    /// * [`Error::TimelockNotExpired`] — called before the timelock has elapsed.
-    ///
-    /// # Authorization
-    /// Requires admin signature (`admin.require_auth()`).
-    ///
-    /// # Events
-    /// Emits `UpgradeExecuted(new_wasm_hash)`.
-    pub fn execute_upgrade(env: Env) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-        admin.require_auth();
+    pub fn get_min_creator_stake(env: Env) -> i128 {
+        FactoryStorage::load_min_creator_stake(&env)
+    }
 
-        let has_pending_hash = env.storage().instance().has(&PENDING_HASH_KEY);
-        let has_execute_after = env.storage().instance().has(&EXECUTE_AFTER_KEY);
-        match (has_pending_hash, has_execute_after) {
-            (false, false) => return Err(Error::NoPendingUpgrade),
-            (true, false) | (false, true) => return Err(Error::MalformedUpgradeState),
-            (true, true) => {}
+    pub fn deploy_arena(
+        env: Env,
+        creator: Address,
+        creator_stake: i128,
+        _entry_fee: i128,
+    ) -> Result<Address, FactoryError> {
+        if !FactoryStorage::has_admin(&env) {
+            return Err(FactoryError::NotInitialized);
         }
 
-        let execute_after: u64 = env
-            .storage()
-            .instance()
-            .get(&EXECUTE_AFTER_KEY)
-            .ok_or(Error::MalformedUpgradeState)?;
+        creator.require_auth();
 
-        if env.ledger().timestamp() < execute_after {
-            return Err(Error::TimelockNotExpired);
+        let min_stake = FactoryStorage::load_min_creator_stake(&env);
+        if creator_stake < min_stake {
+            return Err(FactoryError::InsufficientCreatorStake);
+        }
+        if creator_stake <= 0 {
+            return Err(FactoryError::InvalidStakeAmount);
         }
 
-        let new_wasm_hash: BytesN<32> = env
-            .storage()
-            .instance()
-            .get(&PENDING_HASH_KEY)
-            .ok_or(Error::MalformedUpgradeState)?;
+        let stake_token = FactoryStorage::load_stake_token(&env)
+            .ok_or(FactoryError::NotInitialized)?;
+        let token_client = token::Client::new(&env, &stake_token);
+        token_client.transfer(
+            &creator,
+            &env.current_contract_address(),
+            &creator_stake,
+        );
 
-        // Clear pending state before upgrading.
-        env.storage().instance().remove(&PENDING_HASH_KEY);
-        env.storage().instance().remove(&EXECUTE_AFTER_KEY);
-
+        let arena_id = Self::derive_arena_address(&env);
+        FactoryStorage::save_creator_stake(&env, &arena_id, &creator, creator_stake);
         env.events().publish(
-            (TOPIC_UPGRADE_EXECUTED,),
-            (EVENT_VERSION, new_wasm_hash.clone()),
+            (symbol_short!("DEPLOYED"), arena_id.clone()),
+            (creator.clone(), creator_stake),
         );
 
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(arena_id)
+    }
+
+    pub fn finish_arena(
+        env: Env,
+        admin: Address,
+        arena_id: Address,
+    ) -> Result<(), FactoryError> {
+        Self::require_admin(&env, &admin)?;
+
+        let stake = FactoryStorage::load_creator_stake(&env, &arena_id)
+            .ok_or(FactoryError::ArenaNotFound)?;
+        let stake_token = FactoryStorage::load_stake_token(&env)
+            .ok_or(FactoryError::NotInitialized)?;
+
+        let token_client = token::Client::new(&env, &stake_token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &stake.creator,
+            &stake.amount,
+        );
+        FactoryStorage::remove_creator_stake(&env, &arena_id);
+        env.events().publish(
+            (symbol_short!("FINISHED"), arena_id),
+            (stake.creator, stake.amount),
+        );
         Ok(())
     }
 
-    /// Cancel a pending upgrade proposal. Admin-only.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    ///
-    /// # Errors
-    /// * [`Error::NotInitialized`] — contract not initialised.
-    /// * [`Error::NoPendingUpgrade`] — no proposal to cancel.
-    ///
-    /// # Authorization
-    /// Requires admin signature (`admin.require_auth()`).
-    ///
-    /// # Events
-    /// Emits `UpgradeCancelled`.
-    pub fn cancel_upgrade(env: Env) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
+    pub fn get_creator_stake(
+        env: Env,
+        arena_id: Address,
+    ) -> Result<i128, FactoryError> {
+        let stake = FactoryStorage::load_creator_stake(&env, &arena_id)
+            .ok_or(FactoryError::ArenaNotFound)?;
+        Ok(stake.amount)
+    }
+
+    fn require_admin(env: &Env, admin: &Address) -> Result<(), FactoryError> {
+        let stored_admin = FactoryStorage::load_admin(env).ok_or(FactoryError::NotInitialized)?;
         admin.require_auth();
-
-        if !env.storage().instance().has(&PENDING_HASH_KEY) {
-            return Err(Error::NoPendingUpgrade);
+        if *admin != stored_admin {
+            return Err(FactoryError::Unauthorized);
         }
-
-        env.storage().instance().remove(&PENDING_HASH_KEY);
-        env.storage().instance().remove(&EXECUTE_AFTER_KEY);
-
-        env.events()
-            .publish((TOPIC_UPGRADE_CANCELLED,), (EVENT_VERSION,));
         Ok(())
     }
 
-    /// Return the pending WASM hash and the earliest execution timestamp,
-    /// or `None` if no upgrade has been proposed.
-    ///
-    /// # Authorization
-    /// None — read-only, open to any caller.
-    pub fn pending_upgrade(env: Env) -> Option<(BytesN<32>, u64)> {
-        let hash: Option<BytesN<32>> = env.storage().instance().get(&PENDING_HASH_KEY);
-        let after: Option<u64> = env.storage().instance().get(&EXECUTE_AFTER_KEY);
-        match (hash, after) {
-            (Some(h), Some(a)) => Some((h, a)),
-            _ => None,
+    fn derive_arena_address(env: &Env) -> Address {
+        let nonce = FactoryStorage::next_arena_nonce(env);
+        let mut salt = BytesN::<32>::from_array(env, &[0; 32]);
+        let nonce_bytes = nonce.to_be_bytes();
+        let start = 32 - nonce_bytes.len();
+        for (index, byte) in nonce_bytes.iter().enumerate() {
+            salt.set(start as u32 + index as u32, *byte);
         }
+        env.deployer().with_current_contract(salt).deployed_address()
     }
-
-    /// Get metadata for a specific pool.
-    pub fn get_arena(env: Env, pool_id: u32) -> Option<ArenaMetadata> {
-        env.storage().persistent().get(&DataKey::Pool(pool_id))
-    }
-
-    /// Get a paginated list of arena metadata.
-    /// `limit` is clamped to `MAX_PAGE_SIZE` (50) to prevent unbounded storage reads.
-    pub fn get_arenas(env: Env, offset: u32, limit: u32) -> soroban_sdk::Vec<ArenaMetadata> {
-        let pool_count: u32 = env
-            .storage()
-            .instance()
-            .get(&POOL_COUNT_KEY)
-            .unwrap_or(0u32);
-
-        let clamped_limit = limit.min(MAX_PAGE_SIZE);
-        let mut results = soroban_sdk::Vec::new(&env);
-        let end = core::cmp::min(offset.saturating_add(clamped_limit), pool_count);
-
-        for i in offset..end {
-            if let Some(meta) = Self::get_arena(env.clone(), i) {
-                results.push_back(meta);
-            }
-        }
-        results
-    }
-
-    // ── Emergency pause ──────────────────────────────────────────────────────
-
-    /// Pause the contract, disabling all write operations. Admin-only.
-    pub fn pause(env: Env) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-        admin.require_auth();
-        env.storage().instance().set(&PAUSED_KEY, &true);
-        env.events().publish((TOPIC_PAUSED,), (EVENT_VERSION,));
-        Ok(())
-    }
-
-    /// Unpause the contract, re-enabling write operations. Admin-only.
-    pub fn unpause(env: Env) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-        admin.require_auth();
-        env.storage().instance().remove(&PAUSED_KEY);
-        env.events().publish((TOPIC_UNPAUSED,), (EVENT_VERSION,));
-        Ok(())
-    }
-
-    /// Return whether the contract is currently paused.
-    pub fn is_paused(env: Env) -> bool {
-        env.storage()
-            .instance()
-            .get(&PAUSED_KEY)
-            .unwrap_or(false)
-    }
-}
-
-// ── Private helpers ───────────────────────────────────────────────────────────
-
-/// Return the stored admin address, or `Error::NotInitialized` if absent.
-fn require_admin(env: &Env) -> Result<Address, Error> {
-    env.storage()
-        .instance()
-        .get(&ADMIN_KEY)
-        .ok_or(Error::NotInitialized)
-}
-
-/// Return `Error::Paused` if the contract is currently paused.
-fn require_not_paused(env: &Env) -> Result<(), Error> {
-    if env
-        .storage()
-        .instance()
-        .get(&PAUSED_KEY)
-        .unwrap_or(false)
-    {
-        return Err(Error::Paused);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
-mod test;
+mod test {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    fn setup() -> (
+        Env,
+        Address,
+        FactoryContractClient<'static>,
+        Address,
+        Address,
+        Address,
+        token::Client<'static>,
+        token::StellarAssetClient<'static>,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(FactoryContract, ());
+        let client = FactoryContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract(token_admin.clone());
+        let token_client = token::Client::new(&env, &token_id);
+        let asset_admin = token::StellarAssetClient::new(&env, &token_id);
+
+        client.initialize(&admin, &token_id, &100);
+
+        (
+            env,
+            contract_id,
+            client,
+            admin,
+            creator,
+            token_id,
+            token_client,
+            asset_admin,
+        )
+    }
+
+    #[test]
+    fn deploy_arena_requires_sufficient_stake() {
+        let (_env, _contract_id, client, _admin, creator, _token_id, _token_client, asset_admin) =
+            setup();
+        asset_admin.mint(&creator, &1_000);
+
+        let err = client.try_deploy_arena(&creator, &99, &25).unwrap_err();
+        assert_eq!(err, Ok(FactoryError::InsufficientCreatorStake));
+    }
+
+    #[test]
+    fn deploy_arena_holds_creator_stake() {
+        let (_env, contract_id, client, _admin, creator, _token_id, token_client, asset_admin) =
+            setup();
+        asset_admin.mint(&creator, &1_000);
+
+        let arena_id = client.deploy_arena(&creator, &250, &25);
+
+        assert_eq!(token_client.balance(&creator), 750);
+        assert_eq!(token_client.balance(&contract_id), 250);
+        assert_eq!(client.get_creator_stake(&arena_id), 250);
+    }
+
+    #[test]
+    fn finish_arena_refunds_creator_stake() {
+        let (_env, contract_id, client, admin, creator, _token_id, token_client, asset_admin) =
+            setup();
+        asset_admin.mint(&creator, &1_000);
+
+        let arena_id = client.deploy_arena(&creator, &250, &25);
+        client.finish_arena(&admin, &arena_id);
+
+        assert_eq!(token_client.balance(&creator), 1_000);
+        assert_eq!(token_client.balance(&contract_id), 0);
+        let err = client.try_get_creator_stake(&arena_id).unwrap_err();
+        assert_eq!(err, Ok(FactoryError::ArenaNotFound));
+    }
+
+    #[test]
+    fn admin_can_update_min_creator_stake() {
+        let (_env, _contract_id, client, admin, _creator, _token_id, _token_client, _asset_admin) =
+            setup();
+        client.set_min_creator_stake(&admin, &500);
+        assert_eq!(client.get_min_creator_stake(), 500);
+    }
+}
