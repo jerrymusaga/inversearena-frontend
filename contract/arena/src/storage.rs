@@ -12,6 +12,7 @@ enum DataKey {
     Commitment(Address),
     Choice(Address),
     YieldSnapshot(u32),
+    RoundYieldBps(u32),
 }
 
 pub struct ArenaStorage;
@@ -152,6 +153,21 @@ impl ArenaStorage {
         env.storage()
             .persistent()
             .get(&DataKey::YieldSnapshot(round))
+    }
+
+    /// Persist the oracle-reported yield rate (in bps) for a resolved round.
+    pub fn save_round_yield_bps(env: &Env, round: u32, bps: u32) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::RoundYieldBps(round), &bps);
+    }
+
+    /// Load the snapshotted oracle yield rate for a round. Returns `None` if
+    /// the round has not been resolved yet or pre-dates oracle integration.
+    pub fn load_round_yield_bps(env: &Env, round: u32) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RoundYieldBps(round))
     }
 }
 
