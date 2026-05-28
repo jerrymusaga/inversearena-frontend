@@ -8,6 +8,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+oracle = { path = "../oracle" }
 rwa-adapter = { path = "../rwa-adapter" }
 
 [dev-dependencies]

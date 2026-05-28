@@ -35,6 +35,7 @@ mod snapshot_tests {
             commit_deadline: 1730000000,
             yield_vault: Address::generate(&env),
             round_count: 0,
+            oracle_contract: Address::generate(&env),
         };
         assert!(to_xdr(&env, config).len() > 0);
     }

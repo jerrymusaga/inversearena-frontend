@@ -3,6 +3,7 @@ use soroban_sdk::{Address, Bytes, BytesN, Env, Vec, contract, contractimpl, toke
 
 mod eliminations;
 mod fuzz_tests;
+mod oracle;
 mod snapshot_test;
 mod state_machine;
 mod storage;
@@ -10,7 +11,6 @@ mod types;
 
 use rwa_adapter::RwaAdapterClient;
 use storage::ArenaStorage;
-use types::{ArenaConfig, ArenaError, Choice, GameState, PlayerState, YieldSnapshot};
 
 /// Number of players returned per `get_players` page.
 const PAGE_SIZE: u32 = 50;
@@ -29,33 +29,23 @@ pub struct ArenaContract;
 
 #[contractimpl]
 impl ArenaContract {
-    /// Initialise the arena with configuration.
-    ///
-    /// Must be called once by the admin before any other function.
-    /// Sets `stake_token`, `yield_vault`, and `entry_fee` for the arena lifetime.
+
     pub fn initialize(
         env: Env,
         admin: Address,
         stake_token: Address,
-        yield_vault: Address,
-        entry_fee: i128,
-    ) -> Result<(), ArenaError> {
-        admin.require_auth();
+
 
         let config = ArenaConfig {
             admin,
             stake_token,
-            yield_vault,
-            entry_fee,
-            state: GameState::Open,
-            player_count: 0,
-            commit_deadline: u64::MAX,
-            round_count: 0,
+
         };
         ArenaStorage::save_config(&env, &config);
 
         env.events()
             .publish((soroban_sdk::symbol_short!("init"),), ());
+
         Ok(())
     }
 
@@ -107,107 +97,17 @@ impl ArenaContract {
         Ok(())
     }
 
-    /// Commit a hidden choice via its hash during the commit phase.
-    ///
-    /// `commitment` must be `sha256(choice.to_byte() | salt)` computed
-    /// off-chain by the player. The contract stores only the hash; the
-    /// actual choice and salt must be revealed later via [`reveal_choice`].
-    pub fn commit_choice(env: Env, player: Address, commitment: BytesN<32>) -> Result<(), ArenaError> {
-        player.require_auth();
 
-        let config = ArenaStorage::load_config(&env)?;
-
-        if env.ledger().timestamp() >= config.commit_deadline {
-            return Err(ArenaError::CommitPhaseEnded);
-        }
-
-        ArenaStorage::save_commitment(&env, &player, &commitment);
-
-        env.events()
-            .publish((soroban_sdk::symbol_short!("committed"), player), ());
 
         Ok(())
     }
 
-    /// Reveal a previously committed choice with its salt.
-    ///
-    /// The contract computes `sha256(choice.to_byte() | salt)` and verifies
-    /// it matches the commitment stored during [`commit_choice`].
-    pub fn reveal_choice(
-        env: Env,
-        player: Address,
-        choice: Choice,
-        salt: BytesN<32>,
-    ) -> Result<(), ArenaError> {
-        player.require_auth();
 
-        let config = ArenaStorage::load_config(&env)?;
-
-        if env.ledger().timestamp() < config.commit_deadline {
-            return Err(ArenaError::RevealPhaseNotActive);
-        }
-
-        let stored = ArenaStorage::load_commitment(&env, &player)
-            .ok_or(ArenaError::NoCommitmentFound)?;
-
-        if ArenaStorage::has_revealed(&env, &player) {
-            return Err(ArenaError::AlreadyRevealed);
-        }
-
-        let mut preimage = Bytes::new(&env);
-        preimage.push_back(choice.to_byte());
-        let salt_bytes = salt.to_array();
-        for b in salt_bytes.iter() {
-            preimage.push_back(*b);
-        }
-
-        let computed: BytesN<32> = env.crypto().sha256(&preimage).into();
-        if computed != stored {
-            return Err(ArenaError::HashMismatch);
-        }
-
-        ArenaStorage::save_choice(&env, &player, &choice);
-
-        env.events()
-            .publish((soroban_sdk::symbol_short!("revealed"), player), ());
 
         Ok(())
     }
 
-    /// Join an open arena by staking the entry fee.
-    ///
-    /// Transfers `entry_fee` of `stake_token` from the player to the arena
-    /// contract, then immediately deposits the stake into the RWA yield vault
-    /// via the configured adapter contract.
-    pub fn join(env: Env, player: Address) -> Result<(), ArenaError> {
-        player.require_auth();
 
-        let config = ArenaStorage::load_config(&env)?;
-
-        if config.state != GameState::Open {
-            return Err(ArenaError::CannotCancelStartedGame);
-        }
-
-        if ArenaStorage::load_player(&env, &player).is_some() {
-            return Err(ArenaError::AlreadyJoined);
-        }
-
-        let token_client = token::TokenClient::new(&env, &config.stake_token);
-        let arena_addr = env.current_contract_address();
-        token_client.transfer(&player, &arena_addr, &config.entry_fee);
-
-        arena_addr.require_auth();
-        token_client.transfer(&arena_addr, &config.yield_vault, &config.entry_fee);
-
-        let rwa_client = RwaAdapterClient::new(&env, &config.yield_vault);
-        let _ = rwa_client.deposit(&arena_addr, &config.entry_fee);
-
-        ArenaStorage::add_player(&env, &player);
-
-        env.events().publish(
-            (soroban_sdk::symbol_short!("joined"), player),
-            config.entry_fee,
-        );
 
         Ok(())
     }
@@ -287,11 +187,16 @@ impl ArenaContract {
             return Err(ArenaError::GracePeriodNotElapsed);
         }
 
+        // Fetch the current yield rate from the on-chain oracle. Defaults to
+        // 0 bps if the oracle is unavailable — liveness over precision.
+        let yield_bps = oracle::fetch_yield_bps(&env, &config.oracle_contract);
+        ArenaStorage::save_round_yield_bps(&env, config.round_count, yield_bps);
+
         config.state = GameState::Finished;
         ArenaStorage::save_config(&env, &config);
 
         env.events()
-            .publish((soroban_sdk::symbol_short!("resolved"),), ());
+            .publish((soroban_sdk::symbol_short!("resolved"),), yield_bps);
         Ok(())
     }
 
@@ -347,12 +252,24 @@ impl ArenaContract {
 mod test {
     use super::*;
     use crate::types::ArenaConfig;
-    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::{contract, contractimpl, testutils::{Address as _, Ledger as _}};
+
+    /// Minimal mock oracle that always returns 0 bps — enough for resolve_round tests.
+    #[contract]
+    struct MockOracle;
+
+    #[contractimpl]
+    impl MockOracle {
+        pub fn get_current_yield_bps(_env: Env) -> u32 {
+            0
+        }
+    }
 
     /// Register the contract and seed `n` joined players, returning the client.
     fn setup(n: u32) -> (Env, ArenaContractClient<'static>) {
         let env = Env::default();
         let contract_id = env.register(ArenaContract, ());
+        let oracle_id = env.register(MockOracle, ());
 
         env.as_contract(&contract_id, || {
             let config = ArenaConfig {
@@ -364,6 +281,7 @@ mod test {
                 commit_deadline: u64::MAX,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: oracle_id,
             };
             ArenaStorage::save_config(&env, &config);
             for _ in 0..n {
@@ -453,6 +371,7 @@ mod test {
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: Address::generate(&env),
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::save_commitment(&env, &player, &commitment);
@@ -486,6 +405,7 @@ mod test {
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: Address::generate(&env),
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::save_commitment(&env, &player, &commitment);
@@ -515,6 +435,7 @@ mod test {
                 commit_deadline: 1,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: Address::generate(&env),
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::save_commitment(&env, &player, &commitment);
@@ -545,6 +466,7 @@ mod test {
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: Address::generate(&env),
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::save_commitment(&env, &player, &commitment);
@@ -576,6 +498,7 @@ mod test {
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: Address::generate(&env),
             };
             ArenaStorage::save_config(&env, &config);
         });
@@ -591,6 +514,7 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register(ArenaContract, ());
+        let oracle_id = env.register(MockOracle, ());
         env.as_contract(&contract_id, || {
             let config = ArenaConfig {
                 admin: Address::generate(&env),
@@ -601,6 +525,7 @@ mod test {
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: oracle_id,
             };
             ArenaStorage::save_config(&env, &config);
         });
@@ -648,6 +573,7 @@ mod test {
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
+                oracle_contract: Address::generate(&env),
             };
             ArenaStorage::save_config(&env, &config);
         });

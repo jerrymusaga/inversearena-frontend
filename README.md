@@ -85,6 +85,8 @@ Stellar is the optimal foundation for Inverse Arena:
 └─────────────────────────────────────────────────────┘
 ```
 
+> **RWA Yield Flow:** For a complete end-to-end explanation of how entry fees are converted to USDY, how yield accrues, and how the winner's payout is calculated, see [docs/RWA_YIELD_FLOW.md](docs/RWA_YIELD_FLOW.md).
+
 ### Smart Contracts (Rust/WASM on Soroban)
 
 | Contract | Responsibility |
@@ -153,7 +155,23 @@ git clone https://github.com/your-org/inversearena-frontend.git
 cd inversearena-frontend
 ```
 
-### 2. Set Up the Frontend
+### 2. Quick Start with Make
+
+A root-level `Makefile` provides a single discoverable entry point for all common tasks:
+
+```bash
+make help          # List all available targets
+make dev           # Start frontend + backend in development mode
+make test          # Run all tests (backend + frontend)
+make build         # Build both services for production
+make migrate       # Apply pending Prisma migrations (development)
+make migrate-prod  # Apply migrations in production (no seed)
+make infra         # Start PostgreSQL + Redis via Docker Compose
+make monitoring    # Start Prometheus + Grafana monitoring stack
+make clean         # Remove build artifacts and node_modules
+```
+
+### 3. Set Up the Frontend
 
 ```bash
 cd frontend
@@ -164,7 +182,7 @@ pnpm dev
 
 The frontend runs at **http://localhost:3000** by default.
 
-### 3. Set Up the Backend
+### 4. Set Up the Backend
 
 ```bash
 cd backend
