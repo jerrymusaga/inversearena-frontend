@@ -144,7 +144,7 @@ export class RoundService {
       throw new Error(`Round is not OPEN (current state: ${round.state})`);
     }
     await this.roundRepo.updateState(roundId, RoundState.CLOSED);
-    arenaStateTransitionsTotal.inc({ from: RoundState.OPEN, to: RoundState.CLOSED });
+    arenaStateTransitionsTotal.inc({ from_state: RoundState.OPEN, to_state: RoundState.CLOSED });
     return { state: RoundState.CLOSED };
   }
 

@@ -7,7 +7,7 @@ interface CircuitBreakerOptions {
   volumeThreshold?: number;
 }
 
-interface CircuitBreakerStats {
+export interface CircuitBreakerStats {
   state: CircuitState;
   failures: number;
   successes: number;

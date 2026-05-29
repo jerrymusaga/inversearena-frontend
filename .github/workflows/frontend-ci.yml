@@ -30,7 +30,7 @@ jobs:
         run: pnpm install --no-frozen-lockfile --ignore-scripts
 
       - name: TypeScript typecheck
-        run: ./node_modules/.bin/tsc --noEmit
+        run: pnpm exec tsc --noEmit
 
       - name: Jest unit tests
-        run: ./node_modules/.bin/jest --ci --runInBand --passWithNoTests
+        run: pnpm exec jest --ci --runInBand --passWithNoTests

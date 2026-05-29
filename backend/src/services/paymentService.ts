@@ -1,4 +1,5 @@
 import {
+  Account,
   Address,
   BASE_FEE,
   Contract,
@@ -374,11 +375,11 @@ export class PaymentService {
     }
 
     const args = invoke.args();
-    const destination = String(scValToNative(args[0]));
+    const destination = String(scValToNative(args[0]!));
     if (destination !== transaction.destinationAccount) {
       throw new Error("Signed transaction destination does not match the payout record");
     }
-    const amount = String(scValToNative(args[1]));
+    const amount = String(scValToNative(args[1]!));
     if (amount !== transaction.amountStroops) {
       throw new Error("Signed transaction amount does not match the payout record");
     }
@@ -395,7 +396,7 @@ export class PaymentService {
   private async buildPreparedTransaction(request: CreatePayoutRequest, nonce: number) {
     const sourceAccount = await this.breaker.fire(() =>
       this.rpcServer.getAccount(this.config.sourceAccount)
-    );
+    ) as Account;
     const contract = new Contract(this.config.payoutContractId);
     const amountStroops = toStroops(request.amount);
 
@@ -418,7 +419,7 @@ export class PaymentService {
 
     const preparedTransaction = await this.breaker.fire(() =>
       this.rpcServer.prepareTransaction(built)
-    );
+    ) as Transaction;
 
     const feeStroops = Number(preparedTransaction.fee);
     if (!Number.isFinite(feeStroops) || feeStroops <= 0) {

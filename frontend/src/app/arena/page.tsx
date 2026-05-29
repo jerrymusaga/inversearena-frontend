@@ -35,7 +35,7 @@ const RoundResolvedOverlay = dynamic(
   { ssr: false },
 );
 const EliminationSummaryOverlay = dynamic(
-  () => import("@/components/arena/core/EliminationSummaryOverlay"),
+  () => import("@/components/arena/core/EliminationSummaryOverlay").then((m) => ({ default: m.EliminationSummaryOverlay })),
   { ssr: false },
 );
 

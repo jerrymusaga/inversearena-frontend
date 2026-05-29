@@ -104,6 +104,9 @@ export function createPoolsRouter(authMiddleware: RequestHandler): Router {
     ),
     asyncHandler(async (req, res) => {
       const { id } = req.params;
+      if (!id) {
+        throw apiError(400, "MISSING_POOL_ID", "Pool ID is required");
+      }
       const { limit, cursor } = PaginationSchema.parse(req.query);
 
       const pool = await prisma.pool.findUnique({

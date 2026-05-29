@@ -19,7 +19,7 @@ import type { Event as SentryEvent } from "@sentry/nextjs";
 const STELLAR_PUBLIC_KEY_REGEX = /G[A-Z2-7]{55}/g;
 // Matches any Stellar secret key (S + 55 base32 chars). Events containing
 // these are dropped entirely — they should never appear in error reports.
-const STELLAR_SECRET_KEY_REGEX = /S[A-Z2-7]{55}/g;
+const STELLAR_SECRET_KEY_REGEX = /S[A-Z2-7]{55}/;
 
 /**
  * Replace all Stellar public keys in `text` with the placeholder
@@ -37,7 +37,7 @@ function redactPublicKeys(text: string): string {
  * - If a secret key (S…) appears anywhere in the serialised event the entire
  *   event is dropped (returns `null`) as a belt-and-suspenders safeguard.
  */
-export function scrubStellarAddresses(event: SentryEvent): SentryEvent | null {
+export function scrubStellarAddresses<T extends SentryEvent>(event: T): T | null {
   // Belt-and-suspenders: drop the event entirely if a secret key leaks.
   if (STELLAR_SECRET_KEY_REGEX.test(JSON.stringify(event))) {
     return null;
@@ -53,8 +53,8 @@ export function scrubStellarAddresses(event: SentryEvent): SentryEvent | null {
   }
 
   // Scrub breadcrumb messages and navigation URLs.
-  if (event.breadcrumbs?.values) {
-    for (const breadcrumb of event.breadcrumbs.values) {
+  if (event.breadcrumbs) {
+    for (const breadcrumb of event.breadcrumbs) {
       if (breadcrumb.message) {
         breadcrumb.message = redactPublicKeys(breadcrumb.message);
       }
