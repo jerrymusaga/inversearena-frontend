@@ -1,33 +1,26 @@
 'use client';
 
 import { createContext, ReactNode, useMemo } from 'react';
-import { Networks } from "@creit-tech/stellar-wallets-kit";
 
 import { WalletContextType } from './types';
 import { useStellarWallet } from './useStellarWallet';
+import { stellarConfig } from '@/lib/stellarConfig';
 
 export const WalletContext = createContext<WalletContextType | null>(null);
 
 export const WalletProvider = ({ children }: { children: ReactNode }) => {
-  const { publicKey, isConnected, connectWallet, disconnectWallet } = useStellarWallet(Networks.TESTNET);
-
-  const status = useMemo(() => {
-    if (isConnected) {
-      return 'connected';
-    }
-    // TODO: Add connecting and error states
-    return 'disconnected';
-  }, [isConnected]);
+  const { publicKey, status, error, connectWallet, disconnectWallet } = useStellarWallet(stellarConfig.network);
 
   const contextValue: WalletContextType = useMemo(
     () => ({
       status,
       publicKey: publicKey,
-      error: null, // TODO: Handle errors
+      error,
+      network: stellarConfig.network,
       connect: connectWallet,
       disconnect: disconnectWallet,
     }),
-    [status, publicKey, connectWallet, disconnectWallet]
+    [status, publicKey, error, connectWallet, disconnectWallet]
   );
 
   return <WalletContext.Provider value={contextValue}>{children}</WalletContext.Provider>;

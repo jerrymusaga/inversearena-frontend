@@ -6,6 +6,7 @@ import { useWallet } from "@/shared-d/hooks/useWallet";
 import {
   buildStakeProtocolTransaction,
   submitSignedTransaction,
+  parseStellarError,
 } from "@/shared-d/utils/stellar-transactions";
 
 type TransactionState = "idle" | "signing" | "submitting" | "success" | "error";
@@ -85,8 +86,7 @@ export default function StakeModal({
         onClose();
       }, 1500);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Transaction failed. Please try again.";
-      setErrorMessage(message);
+      setErrorMessage(parseStellarError(err));
       setTxState("error");
     }
   };

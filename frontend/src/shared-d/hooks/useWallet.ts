@@ -12,6 +12,9 @@ import {
   SignedXdrSchema,
   StellarPublicKeySchema,
 } from "@/shared-d/utils/security-validation";
+import { stellarConfig } from "@/lib/stellarConfig";
+
+const HORIZON_URL = stellarConfig.horizonUrl;
 
 /**
  * Wallet connection status
@@ -51,7 +54,7 @@ async function fetchAssetBalance(publicKey: string, assetCode: "XLM" | "USDC"): 
 
   try {
     const res = await fetch(
-      `https://horizon-testnet.stellar.org/accounts/${validatedPublicKey}`
+      `${HORIZON_URL}/accounts/${validatedPublicKey}`
     );
     if (!res.ok) {
       return 0;
@@ -171,7 +174,7 @@ export function useWallet(): UseWalletReturn {
       const validatedXdr = SignedXdrSchema.parse(xdr);
       const networkPassphrase = network
         ? NetworkPassphraseSchema.parse(network)
-        : "Test SDF Network ; September 2015";
+        : stellarConfig.passphrase;
 
       const result = await freighterSignTransaction(validatedXdr, { networkPassphrase });
       if (result.error) {
@@ -198,4 +201,3 @@ export function useWallet(): UseWalletReturn {
     refreshBalance,
   };
 }
-

@@ -24,6 +24,12 @@ const ReconciliationSchema = z.object({
   dryRun: z.boolean().optional().default(false),
 });
 
+const ListAuditLogsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional().default(50),
+  action: z.string().optional(),
+  adminId: z.string().optional(),
+});
+
 export class AdminController {
   constructor(
     private readonly adminService: AdminService,
@@ -43,13 +49,13 @@ export class AdminController {
     const { token, targetStatus } = ForceResolveSchema.parse(req.body);
     const adminId = req.adminId!;
 
-    await this.adminService.verifyAndConsumeToken(token, "force_resolve", id, adminId);
+    await this.adminService.verifyAndConsumeToken(token, "force_resolve", id!, adminId);
 
     let transaction;
     try {
-      transaction = await this.transactions.update(id, {
+      transaction = await this.transactions.update(id!, {
         status: targetStatus,
-        confirmedAt: targetStatus === "confirmed" ? new Date() : undefined,
+        confirmedAt: targetStatus === "confirmed" ? new Date() : null,
         errorMessage: targetStatus === "failed" ? "Force-resolved by admin" : null,
         updatedAt: new Date(),
       });
@@ -58,22 +64,22 @@ export class AdminController {
         adminId,
         action: "force_resolve",
         resourceType: "transaction",
-        resourceId: id,
+        resourceId: id!,
         status: "success",
         metadata: { targetStatus },
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+        ...(req.ip !== undefined && { ipAddress: req.ip }),
+        ...(req.headers["user-agent"] !== undefined && { userAgent: req.headers["user-agent"] }),
       });
     } catch (err) {
       await this.adminService.log({
         adminId,
         action: "force_resolve",
         resourceType: "transaction",
-        resourceId: id,
+        resourceId: id!,
         status: "failed",
         errorMessage: err instanceof Error ? err.message : "Unknown error",
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+        ...(req.ip !== undefined && { ipAddress: req.ip }),
+        ...(req.headers["user-agent"] !== undefined && { userAgent: req.headers["user-agent"] }),
       });
       throw err;
     }
@@ -86,11 +92,11 @@ export class AdminController {
     const { token } = TokenOnlySchema.parse(req.body);
     const adminId = req.adminId!;
 
-    await this.adminService.verifyAndConsumeToken(token, "resubmit", id, adminId);
+    await this.adminService.verifyAndConsumeToken(token, "resubmit", id!, adminId);
 
     let transaction;
     try {
-      transaction = await this.transactions.update(id, {
+      transaction = await this.transactions.update(id!, {
         status: "queued",
         attempts: 0,
         errorMessage: null,
@@ -101,21 +107,21 @@ export class AdminController {
         adminId,
         action: "resubmit",
         resourceType: "transaction",
-        resourceId: id,
+        resourceId: id!,
         status: "success",
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+        ...(req.ip !== undefined && { ipAddress: req.ip }),
+        ...(req.headers["user-agent"] !== undefined && { userAgent: req.headers["user-agent"] }),
       });
     } catch (err) {
       await this.adminService.log({
         adminId,
         action: "resubmit",
         resourceType: "transaction",
-        resourceId: id,
+        resourceId: id!,
         status: "failed",
         errorMessage: err instanceof Error ? err.message : "Unknown error",
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+        ...(req.ip !== undefined && { ipAddress: req.ip }),
+        ...(req.headers["user-agent"] !== undefined && { userAgent: req.headers["user-agent"] }),
       });
       throw err;
     }
@@ -128,16 +134,16 @@ export class AdminController {
     const { token } = TokenOnlySchema.parse(req.body);
     const adminId = req.adminId!;
 
-    await this.adminService.verifyAndConsumeToken(token, "reindex_pool", id, adminId);
+    await this.adminService.verifyAndConsumeToken(token, "reindex_pool", id!, adminId);
 
     await this.adminService.log({
       adminId,
       action: "reindex_pool",
       resourceType: "pool",
-      resourceId: id,
+      resourceId: id!,
       status: "success",
-      ipAddress: req.ip,
-      userAgent: req.headers["user-agent"],
+      ...(req.ip !== undefined && { ipAddress: req.ip }),
+      ...(req.headers["user-agent"] !== undefined && { userAgent: req.headers["user-agent"] }),
     });
 
     res.json({ message: "Pool reindex queued", poolId: id });
@@ -172,8 +178,8 @@ export class AdminController {
         resourceId: "global",
         status: "success",
         metadata: result,
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+        ...(req.ip !== undefined && { ipAddress: req.ip }),
+        ...(req.headers["user-agent"] !== undefined && { userAgent: req.headers["user-agent"] }),
       });
     } catch (err) {
       await this.adminService.log({
@@ -183,8 +189,8 @@ export class AdminController {
         resourceId: "global",
         status: "failed",
         errorMessage: err instanceof Error ? err.message : "Unknown error",
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+        ...(req.ip !== undefined && { ipAddress: req.ip }),
+        ...(req.headers["user-agent"] !== undefined && { userAgent: req.headers["user-agent"] }),
       });
       throw err;
     }
@@ -193,11 +199,11 @@ export class AdminController {
   };
 
   listAuditLogs = async (req: Request, res: Response): Promise<void> => {
-    const limit = Math.min(Number(req.query.limit ?? 50), 200);
+    const { limit, action, adminId } = ListAuditLogsQuerySchema.parse(req.query);
     const filter: Record<string, unknown> = {};
 
-    if (typeof req.query.action === "string") filter.action = req.query.action;
-    if (typeof req.query.adminId === "string") filter.adminId = req.query.adminId;
+    if (action !== undefined) filter.action = action;
+    if (adminId !== undefined) filter.adminId = adminId;
 
     const [logs, total] = await Promise.all([
       AuditLogModel.find(filter).sort({ createdAt: -1 }).limit(limit).lean(),

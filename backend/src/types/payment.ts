@@ -4,7 +4,8 @@ export type PaymentStatus =
   | "awaiting_signature"
   | "submitted"
   | "confirmed"
-  | "failed";
+  | "failed"
+  | "dead";
 
 export interface TransactionRecord {
   id: string;

@@ -1,64 +1,92 @@
+/**
+ * Stellar / Soroban orchestration for Inverse Arena.
+ *
+ * Split per #245: `contract-client-factory`, `horizon-account-loader`,
+ * `stellar-fee-estimator`, and `soroban-transaction-composer`.
+ */
+import { Account, TransactionBuilder } from "@stellar/stellar-sdk";
 import {
-  Account,
-  Address,
-  BASE_FEE,
-  Contract,
-  TimeoutInfinite,
-  TransactionBuilder,
-  nativeToScVal,
-  xdr,
-} from "@stellar/stellar-sdk";
-import { Server } from "@stellar/stellar-sdk/rpc";
-import { z } from "zod";
-import {
-  ArenaCapacitySchema,
-  HorizonAccountResponseSchema,
   PositiveAmountSchema,
-  PoolCurrencySchema,
   RoundChoiceSchema,
   RoundNumberSchema,
-  RoundSpeedSchema,
   SignedXdrSchema,
   StellarContractIdSchema,
   StellarPublicKeySchema,
 } from "@/shared-d/utils/security-validation";
+import {
+} from "@/components/hook-d/arenaConstants";
+import { STELLAR_PLACEHOLDERS, stellarConfig } from "@/lib/stellarConfig";
+import {
+  ContractError,
+  ContractErrorCode,
+  parseContractError,
+} from "@/shared-d/utils/contract-error";
+import { ContractClientFactory } from "@/shared-d/utils/contract-client-factory";
+import {
+  HorizonAccountFetchError,
+  loadAccountFromHorizon,
+} from "@/shared-d/utils/horizon-account-loader";
+import {
+  getDefaultInvokeBaseFee,
+  getInfiniteTimeout,
+  getJoinArenaFee,
+  getShortTxTimeoutSeconds,
+  getStandardTxTimeoutSeconds,
+  getSubmitRetryConfig,
+} from "@/shared-d/utils/stellar-fee-estimator";
+import {
+  buildClaimCallOperation,
+  buildCreatePoolCallOperation,
+  buildGetFullStateCallOperation,
+  buildJoinCallOperation,
+  buildStakeCallOperation,
+  buildUnstakeCallOperation,
+  buildSubmitChoiceCallOperation,
+  composeUnsignedTransaction,
+} from "@/shared-d/utils/soroban-transaction-composer";
+import { CreatePoolParamsSchema } from "@/shared-d/utils/stellar-transaction-schemas";
+import {
+  extractBoolFromScVal,
+  extractI128FromScVal,
+  extractU32FromScVal,
+  stroopsToDisplayAmount,
+} from "@/shared-d/utils/stellar-scval-extract";
 
-// Constants (Replace with real Contract IDs in production/env)
-export const FACTORY_CONTRACT_ID = "CB..."; // TODO: Add real Factory Contract ID
-export const XLM_CONTRACT_ID = "CAS3J7GYLGXMF6TDJBXBGMELNUPVCGXIZ68TZE6GTVASJ63Y32KXVY77"; // Testnet Native SAC
-export const USDC_CONTRACT_ID = "CC..."; // TODO: Add real USDC Contract ID
+// Re-export so consumers can import from one place
+export { ContractError, ContractErrorCode, parseContractError } from "@/shared-d/utils/contract-error";
 
-const STAKING_CONTRACT_PLACEHOLDER = "CD...";
+export { ContractClientFactory } from "@/shared-d/utils/contract-client-factory";
+export type { ContractClientFactoryDeps } from "@/shared-d/utils/contract-client-factory";
+
+export const FACTORY_CONTRACT_ID = stellarConfig.factoryContractId;
+export const XLM_CONTRACT_ID = stellarConfig.xlmContractId;
+export const USDC_CONTRACT_ID = stellarConfig.usdcContractId;
 export const STAKING_CONTRACT_ID =
-  process.env.NEXT_PUBLIC_STAKING_CONTRACT_ID || STAKING_CONTRACT_PLACEHOLDER;
+  stellarConfig.stakingContractId ?? STELLAR_PLACEHOLDERS.stakingContractId;
 
-export const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015"; // Testnet
-export const SOROBAN_RPC_URL = "https://soroban-testnet.stellar.org";
+export const NETWORK_PASSPHRASE = stellarConfig.passphrase;
+export const HORIZON_URL = stellarConfig.horizonUrl;
+export const SOROBAN_RPC_URL = stellarConfig.sorobanRpcUrl;
 
-const CreatePoolParamsSchema = z.object({
-  stakeAmount: PositiveAmountSchema,
-  currency: PoolCurrencySchema,
-  roundSpeed: RoundSpeedSchema,
-  arenaCapacity: ArenaCapacitySchema,
-});
+const defaultSorobanClients = new ContractClientFactory(SOROBAN_RPC_URL);
 
 /**
- * Helper to get the latest sequence number for an account.
+ * Orchestration: Horizon account load + {@link ContractError} mapping.
+ * Low-level fetch lives in {@link loadAccountFromHorizon}.
  */
-async function getAccount(publicKey: string): Promise<Account> {
-  const validatedPublicKey = StellarPublicKeySchema.parse(publicKey);
-
-  const res = await fetch(
-    `https://horizon-testnet.stellar.org/accounts/${validatedPublicKey}`
-  );
-  if (!res.ok) {
-    throw new Error("Account not found on network. Please fund it.");
+async function getAccount(publicKey: string, fn: string): Promise<Account> {
+  try {
+    const validatedPublicKey = StellarPublicKeySchema.parse(publicKey);
+    return await loadAccountFromHorizon(HORIZON_URL, validatedPublicKey);
+  } catch (error) {
+    if (error instanceof HorizonAccountFetchError) {
+      throw new ContractError({
+        code: ContractErrorCode.ACCOUNT_NOT_FOUND,
+        fn,
+      });
+    }
+    throw parseContractError(error, fn);
   }
-
-  const rawData: unknown = await res.json();
-  const data = HorizonAccountResponseSchema.parse(rawData);
-
-  return new Account(validatedPublicKey, data.sequence);
 }
 
 /**
@@ -71,84 +99,132 @@ export async function buildCreatePoolTransaction(
     currency: string;
     roundSpeed: string;
     arenaCapacity: number;
-  }
+  },
 ) {
-  const validatedParams = CreatePoolParamsSchema.parse(params);
-  const account = await getAccount(publicKey);
-  const factory = new Contract(FACTORY_CONTRACT_ID);
+  const FN = "buildCreatePoolTransaction";
+  try {
+    const validatedParams = CreatePoolParamsSchema.parse(params);
+    const account = await getAccount(publicKey, FN);
+    const factory = defaultSorobanClients.createContract(FACTORY_CONTRACT_ID);
 
-  // Convert stake amount to stroops/units (7 decimals).
-  const amountBigInt = BigInt(Math.floor(validatedParams.stakeAmount * 10_000_000));
+    const operation = buildCreatePoolCallOperation(factory, validatedParams, {
+      xlmContractId: XLM_CONTRACT_ID,
+      usdcContractId: USDC_CONTRACT_ID,
+    });
 
-  const args = [
-    nativeToScVal(amountBigInt, { type: "i128" }),
-    new Contract(
-      validatedParams.currency === "USDC" ? USDC_CONTRACT_ID : XLM_CONTRACT_ID
-    )
-      .address()
-      .toScVal(),
-    nativeToScVal(
-      validatedParams.roundSpeed === "30S"
-        ? 30
-        : validatedParams.roundSpeed === "1M"
-          ? 60
-          : 300,
-      { type: "u32" }
-    ),
-    nativeToScVal(validatedParams.arenaCapacity, { type: "u32" }),
-  ];
-
-  const callOperation = factory.call("create_pool", ...args);
-
-  return new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-    .addOperation(callOperation)
-    .setTimeout(TimeoutInfinite)
-    .build();
+    return composeUnsignedTransaction(account, {
+      fee: getDefaultInvokeBaseFee(),
+      networkPassphrase: NETWORK_PASSPHRASE,
+      timeout: getInfiniteTimeout(),
+      operation,
+    });
+  } catch (error) {
+    throw parseContractError(error, FN);
+  }
 }
 
 /**
  * Build an unsigned transaction to stake XLM via the protocol contract.
  * Uses Soroban prepareTransaction for correct footprint and fees.
  */
-export async function buildStakeProtocolTransaction(publicKey: string, amount: number) {
-  const validatedPublicKey = StellarPublicKeySchema.parse(publicKey);
-  const validatedAmount = PositiveAmountSchema.parse(amount);
+export async function buildStakeProtocolTransaction(
+  publicKey: string,
+  amount: number,
+) {
+  const FN = "buildStakeProtocolTransaction";
+  try {
+    const validatedPublicKey = StellarPublicKeySchema.parse(publicKey);
+    const validatedAmount = PositiveAmountSchema.parse(amount);
 
-  if (
-    !STAKING_CONTRACT_ID ||
-    STAKING_CONTRACT_ID === STAKING_CONTRACT_PLACEHOLDER ||
-    STAKING_CONTRACT_ID.includes("...")
-  ) {
-    throw new Error(
-      "Staking contract not configured. Add NEXT_PUBLIC_STAKING_CONTRACT_ID to .env.local with your Soroban contract address."
+    if (
+      !STAKING_CONTRACT_ID ||
+      STAKING_CONTRACT_ID === STELLAR_PLACEHOLDERS.stakingContractId ||
+      STAKING_CONTRACT_ID.includes("...")
+    ) {
+      throw new ContractError({
+        code: ContractErrorCode.CONFIG_MISSING,
+        message:
+          "Staking contract not configured. Add NEXT_PUBLIC_STAKING_CONTRACT_ID to .env.local with your Soroban contract address.",
+        fn: FN,
+      });
+    }
+
+    const server = defaultSorobanClients.createRpcServer();
+    const account = await getAccount(validatedPublicKey, FN);
+    const stakingContract = defaultSorobanClients.createContract(
+      STAKING_CONTRACT_ID,
     );
+
+    const amountStroops = BigInt(Math.floor(validatedAmount * 10_000_000));
+    const operation = buildStakeCallOperation(
+      stakingContract,
+      amountStroops,
+      validatedPublicKey,
+    );
+
+    const builtTx = composeUnsignedTransaction(account, {
+      fee: getDefaultInvokeBaseFee(),
+      networkPassphrase: NETWORK_PASSPHRASE,
+      timeout: getInfiniteTimeout(),
+      operation,
+    });
+
+    return server.prepareTransaction(builtTx);
+  } catch (error) {
+    throw parseContractError(error, FN);
   }
+}
 
-  const server = new Server(SOROBAN_RPC_URL);
-  const account = await getAccount(validatedPublicKey);
-  const stakingContract = new Contract(STAKING_CONTRACT_ID);
+/**
+ * Build an unsigned transaction to unstake shares via the protocol contract.
+ * Uses Soroban prepareTransaction for correct footprint and fees.
+ */
+export async function buildUnstakeProtocolTransaction(
+  publicKey: string,
+  shares: number,
+) {
+  const FN = "buildUnstakeProtocolTransaction";
+  try {
+    const validatedPublicKey = StellarPublicKeySchema.parse(publicKey);
+    const validatedShares = PositiveAmountSchema.parse(shares);
 
-  const amountStroops = BigInt(Math.floor(validatedAmount * 10_000_000));
-  const addressScVal = new Address(validatedPublicKey).toScVal();
+    if (
+      !STAKING_CONTRACT_ID ||
+      STAKING_CONTRACT_ID === STELLAR_PLACEHOLDERS.stakingContractId ||
+      STAKING_CONTRACT_ID.includes("...")
+    ) {
+      throw new ContractError({
+        code: ContractErrorCode.CONFIG_MISSING,
+        message:
+          "Staking contract not configured. Add NEXT_PUBLIC_STAKING_CONTRACT_ID to .env.local with your Soroban contract address.",
+        fn: FN,
+      });
+    }
 
-  const callOperation = stakingContract.call(
-    "stake",
-    addressScVal,
-    nativeToScVal(amountStroops, { type: "i128" })
-  );
+    const server = defaultSorobanClients.createRpcServer();
+    const account = await getAccount(validatedPublicKey, FN);
+    const stakingContract = defaultSorobanClients.createContract(
+      STAKING_CONTRACT_ID,
+    );
 
-  const builtTx = new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-    .addOperation(callOperation)
-    .setTimeout(TimeoutInfinite)
-    .build();
+    const sharesStroops = BigInt(Math.floor(validatedShares * 10_000_000));
+    const operation = buildUnstakeCallOperation(
+      stakingContract,
+      sharesStroops,
+      validatedPublicKey,
+    );
 
-  return server.prepareTransaction(builtTx);
+    const builtTx = composeUnsignedTransaction(account, {
+      fee: getDefaultInvokeBaseFee(),
+      networkPassphrase: NETWORK_PASSPHRASE,
+      timeout: getInfiniteTimeout(),
+      operation,
+    });
+
+    return server.prepareTransaction(builtTx);
+  } catch (error) {
+    throw parseContractError(error, FN);
+  }
 }
 
 /**
@@ -157,23 +233,27 @@ export async function buildStakeProtocolTransaction(publicKey: string, amount: n
 export async function buildJoinArenaTransaction(
   publicKey: string,
   poolId: string,
-  amount: number
+  amount: number,
 ) {
-  const validatedPublicKey = StellarPublicKeySchema.parse(publicKey);
-  const validatedPoolId = StellarContractIdSchema.parse(poolId);
-  PositiveAmountSchema.parse(amount);
+  const FN = "buildJoinArenaTransaction";
+  try {
+    const validatedPublicKey = StellarPublicKeySchema.parse(publicKey);
+    const validatedPoolId = StellarContractIdSchema.parse(poolId);
+    PositiveAmountSchema.parse(amount);
 
-  const account = await getAccount(validatedPublicKey);
-  const poolContract = new Contract(validatedPoolId);
-  const callOperation = poolContract.call("join");
+    const account = await getAccount(validatedPublicKey, FN);
+    const poolContract = defaultSorobanClients.createContract(validatedPoolId);
+    const operation = buildJoinCallOperation(poolContract);
 
-  return new TransactionBuilder(account, {
-    fee: "10000",
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-    .addOperation(callOperation)
-    .setTimeout(30)
-    .build();
+    return composeUnsignedTransaction(account, {
+      fee: getJoinArenaFee(),
+      networkPassphrase: NETWORK_PASSPHRASE,
+      timeout: getStandardTxTimeoutSeconds(),
+      operation,
+    });
+  } catch (error) {
+    throw parseContractError(error, FN);
+  }
 }
 
 /**
@@ -183,142 +263,235 @@ export async function buildSubmitChoiceTransaction(
   publicKey: string,
   poolId: string,
   choice: "Heads" | "Tails",
-  roundNumber: number
+  roundNumber: number,
 ) {
-  const validatedPublicKey = StellarPublicKeySchema.parse(publicKey);
-  const validatedPoolId = StellarContractIdSchema.parse(poolId);
-  const validatedChoice = RoundChoiceSchema.parse(choice);
-  const validatedRoundNumber = RoundNumberSchema.parse(roundNumber);
+  const FN = "buildSubmitChoiceTransaction";
+  try {
+    const validatedPublicKey = StellarPublicKeySchema.parse(publicKey);
+    const validatedPoolId = StellarContractIdSchema.parse(poolId);
+    const validatedChoice = RoundChoiceSchema.parse(choice);
+    const validatedRoundNumber = RoundNumberSchema.parse(roundNumber);
 
-  const account = await getAccount(validatedPublicKey);
-  const poolContract = new Contract(validatedPoolId);
-  const choiceVal = xdr.ScVal.scvSymbol(validatedChoice === "Heads" ? "Heads" : "Tails");
+    const account = await getAccount(validatedPublicKey, FN);
+    const poolContract = defaultSorobanClients.createContract(validatedPoolId);
+    const operation = buildSubmitChoiceCallOperation(
+      poolContract,
+      validatedRoundNumber,
+      validatedChoice,
+    );
 
-  const callOperation = poolContract.call(
-    "submit_choice",
-    nativeToScVal(validatedRoundNumber, { type: "u32" }),
-    choiceVal
-  );
-
-  return new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-    .addOperation(callOperation)
-    .setTimeout(30)
-    .build();
+    return composeUnsignedTransaction(account, {
+      fee: getDefaultInvokeBaseFee(),
+      networkPassphrase: NETWORK_PASSPHRASE,
+      timeout: getStandardTxTimeoutSeconds(),
+      operation,
+    });
+  } catch (error) {
+    throw parseContractError(error, FN);
+  }
 }
 
 /**
  * Claim winnings.
  */
-export async function buildClaimWinningsTransaction(publicKey: string, poolId: string) {
-  const validatedPublicKey = StellarPublicKeySchema.parse(publicKey);
-  const validatedPoolId = StellarContractIdSchema.parse(poolId);
+export async function buildClaimWinningsTransaction(
+  publicKey: string,
+  poolId: string,
+) {
+  const FN = "buildClaimWinningsTransaction";
+  try {
+    const validatedPublicKey = StellarPublicKeySchema.parse(publicKey);
+    const validatedPoolId = StellarContractIdSchema.parse(poolId);
 
-  const account = await getAccount(validatedPublicKey);
-  const poolContract = new Contract(validatedPoolId);
-  const callOperation = poolContract.call("claim");
+    const account = await getAccount(validatedPublicKey, FN);
+    const poolContract = defaultSorobanClients.createContract(validatedPoolId);
+    const operation = buildClaimCallOperation(poolContract);
 
-  return new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-    .addOperation(callOperation)
-    .setTimeout(30)
-    .build();
+    return composeUnsignedTransaction(account, {
+      fee: getDefaultInvokeBaseFee(),
+      networkPassphrase: NETWORK_PASSPHRASE,
+      timeout: getShortTxTimeoutSeconds(),
+      operation,
+    });
+  } catch (error) {
+    throw parseContractError(error, FN);
+  }
 }
 
 /**
- * Parse Stellar error results to user-friendly messages.
+ * Parse Stellar / Soroban errors for display in the UI.
+ *
+ * Delegates to `parseContractError` so copy stays aligned with
+ * `contract/ERRORS.md` and `DEFAULT_MESSAGES` in `contract-error.ts`.
+ * On-chain numeric codes are resolved via `contract-error-registry.ts`.
  */
 export function parseStellarError(error: unknown): string {
-  const errorString =
-    error instanceof Error
-      ? error.message
-      : typeof error === "string"
-        ? error
-        : typeof error === "object" && error !== null && "message" in error
-          ? String((error as { message: unknown }).message)
-          : String(error ?? "");
+  if (error instanceof ContractError) {
+    return error.message;
+  }
+  return parseContractError(error, "parseStellarError").message;
+}
 
-  if (errorString.includes("tx_bad_auth")) {
-    return "Invalid or unauthorized transaction. Please check your wallet permissions.";
-  }
-  if (errorString.includes("op_underfunded")) {
-    return "Insufficient balance to cover the transaction and fees.";
-  }
-  if (errorString.includes("tx_too_late")) {
-    return "Transaction expired. Please try again.";
-  }
-  if (errorString.includes("User rejected")) {
-    return "Transaction was cancelled by the user.";
-  }
-
-  return errorString || "An unknown error occurred during the transaction.";
+/**
+ * Arena state response type
+ */
+export interface ArenaStateResponse {
+  arenaId: string;
+  survivorsCount: number;
+  maxCapacity: number;
+  isUserIn: boolean;
+  hasWon: boolean;
+  currentStake: number;
+  potentialPayout: number;
+  roundNumber: number;
 }
 
 /**
  * Fetch the latest arena state from the contract.
+ * Queries the Soroban arena contract for live state data.
  */
-export async function fetchArenaState(arenaId: string, userAddress?: string) {
-  const validatedArenaId = StellarContractIdSchema.parse(arenaId);
-  if (userAddress) {
-    StellarPublicKeySchema.parse(userAddress);
+export async function fetchArenaState(
+  arenaId: string,
+  userAddress?: string,
+): Promise<ArenaStateResponse> {
+  const FN = "fetchArenaState";
+  try {
+    const validatedArenaId = StellarContractIdSchema.parse(arenaId);
+    const validatedUserAddress = userAddress
+      ? StellarPublicKeySchema.parse(userAddress)
+      : undefined;
+
+    const server = defaultSorobanClients.createRpcServer();
+    const arenaContract = defaultSorobanClients.createContract(validatedArenaId);
+
+    const dummyAccount = new Account(
+      "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+      "0",
+    );
+
+    const stateReaderAddress =
+      validatedUserAddress ||
+      "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+    const getStateOperation = buildGetFullStateCallOperation(
+      arenaContract,
+      stateReaderAddress,
+    );
+    const stateTx = composeUnsignedTransaction(dummyAccount, {
+      fee: getDefaultInvokeBaseFee(),
+      networkPassphrase: NETWORK_PASSPHRASE,
+      timeout: getShortTxTimeoutSeconds(),
+      operation: getStateOperation,
+    });
+
+    const stateSimulation = await server.simulateTransaction(stateTx);
+
+    if (
+      "error" in stateSimulation ||
+      !("result" in stateSimulation) ||
+      !stateSimulation.result ||
+      stateSimulation.result.retval === undefined
+    ) {
+      const errorMsg =
+        "error" in stateSimulation ? stateSimulation.error : "Unknown error";
+      throw new ContractError({
+        code: ContractErrorCode.SIMULATION_FAILED,
+        message: `Failed to fetch arena state: ${errorMsg}`,
+        fn: FN,
+      });
+    }
+
+    const stateData = stateSimulation.result.retval;
+
+    const survivorsCount =
+      extractU32FromScVal(stateData, "survivors_count") || 0;
+    const maxCapacity = extractU32FromScVal(stateData, "max_capacity") || 0;
+    const roundNumber = extractU32FromScVal(stateData, "round_number") || 0;
+    const currentStakeStroops =
+      extractI128FromScVal(stateData, "current_stake") ?? 0n;
+    const potentialPayout =
+      extractI128FromScVal(stateData, "potential_payout") ?? 0n;
+    const isUserIn = extractBoolFromScVal(stateData, "is_active") || false;
+    const hasWon = extractBoolFromScVal(stateData, "has_won") || false;
+
+    return {
+      arenaId: validatedArenaId,
+      survivorsCount,
+      maxCapacity,
+      isUserIn,
+      hasWon,
+      currentStake: stroopsToDisplayAmount(currentStakeStroops),
+      potentialPayout: stroopsToDisplayAmount(potentialPayout),
+      roundNumber,
+    };
+  } catch (error) {
+    throw parseContractError(error, FN);
   }
-
-  // Mock contract call while ABI/state integration is pending.
-  await new Promise((resolve) => setTimeout(resolve, 500));
-
-  return {
-    arenaId: validatedArenaId,
-    survivorsCount: 128,
-    maxCapacity: 1024,
-    isUserIn: Boolean(userAddress),
-    hasWon: false,
-    currentStake: 1200,
-    potentialPayout: 24420,
-    roundNumber: 12,
-  };
 }
 
 /**
  * Submit a signed transaction to the network.
  */
 export async function submitSignedTransaction(signedXdr: string) {
-  const validatedSignedXdr = SignedXdrSchema.parse(signedXdr);
-  const server = new Server(SOROBAN_RPC_URL);
+  const FN = "submitSignedTransaction";
+  try {
+    const validatedSignedXdr = SignedXdrSchema.parse(signedXdr);
+    const server = defaultSorobanClients.createRpcServer();
 
-  const tx = TransactionBuilder.fromXDR(validatedSignedXdr, NETWORK_PASSPHRASE);
-  const response = await server.sendTransaction(tx);
+    const tx = TransactionBuilder.fromXDR(
+      validatedSignedXdr,
+      NETWORK_PASSPHRASE,
+    );
+    const response = await server.sendTransaction(tx);
 
-  if (response.status !== "PENDING") {
-    throw new Error(`Transaction failed: ${response.status}`);
-  }
-
-  const hash = response.hash;
-  let getTxResponse: Awaited<ReturnType<Server["getTransaction"]>> | undefined;
-
-  const MAX_RETRIES = 10;
-  let retries = 0;
-
-  while (retries < MAX_RETRIES) {
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    try {
-      getTxResponse = await server.getTransaction(hash);
-      if (getTxResponse.status !== "NOT_FOUND") {
-        break;
-      }
-    } catch {
-      // Ignore transient fetch failures while polling.
+    if (response.status !== "PENDING") {
+      throw new ContractError({
+        code: ContractErrorCode.TRANSACTION_FAILED,
+        message: `Transaction rejected by network: ${response.status}`,
+        fn: FN,
+      });
     }
-    retries++;
-  }
 
-  if (!getTxResponse || getTxResponse.status !== "SUCCESS") {
-    throw new Error(`Transaction validation failed: ${getTxResponse?.status}`);
-  }
+    const hash = response.hash;
+    let getTxResponse: Awaited<
+      ReturnType<(typeof server)["getTransaction"]>
+    > | undefined;
 
-  return getTxResponse;
+    const { maxRetries, retryIntervalMs } = getSubmitRetryConfig();
+    let retries = 0;
+
+    while (retries < maxRetries) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, retryIntervalMs),
+      );
+      try {
+        getTxResponse = await server.getTransaction(hash);
+        if (getTxResponse.status !== "NOT_FOUND") {
+          break;
+        }
+      } catch {
+        // Ignore transient fetch failures while polling.
+      }
+      retries++;
+    }
+
+    if (!getTxResponse) {
+      throw new ContractError({
+        code: ContractErrorCode.TRANSACTION_TIMEOUT,
+        fn: FN,
+      });
+    }
+
+    if (getTxResponse.status !== "SUCCESS") {
+      throw new ContractError({
+        code: ContractErrorCode.TRANSACTION_FAILED,
+        message: `Transaction confirmation failed: ${getTxResponse.status}`,
+        fn: FN,
+      });
+    }
+
+    return getTxResponse;
+  } catch (error) {
+    throw parseContractError(error, FN);
+  }
 }
-

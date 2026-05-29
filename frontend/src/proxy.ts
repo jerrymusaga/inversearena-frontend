@@ -1,5 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseAllowedOrigins } from "@/shared-d/utils/security-validation";
+import { stellarConfig } from "@/lib/stellarConfig";
+
+function toOrigin(url: string): string {
+  const candidate = url.trim();
+
+  try {
+    return new URL(candidate).origin;
+  } catch {
+    return candidate;
+  }
+}
+
+function getNetworkConnectSources(): string[] {
+  const horizonOrigin = toOrigin(stellarConfig.horizonUrl);
+  const sorobanOrigin = toOrigin(stellarConfig.sorobanRpcUrl);
+  return [horizonOrigin, sorobanOrigin];
+}
 
 function getAllowedOrigins(): string[] {
   const configuredOrigins = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
@@ -21,13 +38,14 @@ function getAllowedOrigins(): string[] {
 function buildCsp(allowedOrigins: string[]) {
   const isDev = process.env.NODE_ENV !== "production";
 
-  const connectSrc = [
-    "'self'",
-    ...allowedOrigins,
-    "https://horizon-testnet.stellar.org",
-    "https://soroban-testnet.stellar.org",
-    "https://api.coingecko.com",
-  ];
+  const connectSrc = Array.from(
+    new Set([
+      "'self'",
+      ...allowedOrigins,
+      ...getNetworkConnectSources(),
+      "https://api.coingecko.com",
+    ])
+  );
 
   if (isDev) {
     connectSrc.push("ws:", "wss:");
@@ -125,4 +143,3 @@ export function proxy(request: NextRequest) {
 export const config = {
   matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };
-

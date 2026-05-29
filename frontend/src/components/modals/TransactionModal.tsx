@@ -57,12 +57,9 @@ export function TransactionModal({
             // However, if onConfirm involves the whole flow including submission, it might take time.
             // Let's assume onConfirm resolves when the txn is successfully submitted on-chain or at least sent.
             setState("SUCCESS");
-        } catch (err: any) {
-            console.error("Transaction failed:", err);
+        } catch (err: unknown) {
             setState("ERROR");
-            // Use parseStellarError to get a user-friendly message
-            const parsedError = parseStellarError(err);
-            setErrorMessage(parsedError);
+            setErrorMessage(parseStellarError(err));
         }
     }, [onConfirm]);
 

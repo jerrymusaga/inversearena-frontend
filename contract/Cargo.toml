@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "arena",
+    "factory",
+    "oracle",
+    "payout",
+    "staking",
+    "rwa-adapter",
+]
+
+[workspace.dependencies]
+soroban-sdk = "22"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

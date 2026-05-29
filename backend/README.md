@@ -1,46 +1,149 @@
 # Backend Payout Execution
 
-This folder contains the Soroban payout execution layer for winner distributions.
-
-## Security
-
-### HTTP Security Headers
-
-The backend API is configured with comprehensive security headers via Helmet:
-
-- **HSTS (Strict-Transport-Security)**: Forces HTTPS for 1 year, including subdomains and preload
-- **Referrer-Policy**: Set to `strict-origin-when-cross-origin` for privacy and analytics balance
-- **Cross-Origin-Opener-Policy**: Set to `same-origin` for improved isolation
-- **Cross-Origin-Resource-Policy**: Set to `cross-origin` to allow frontend resource loading
-- **X-Frame-Options**: Prevents clickjacking attacks
-- **X-Content-Type-Options**: Prevents MIME-sniffing
-- **X-DNS-Prefetch-Control**: Controls DNS prefetching
-- **X-Permitted-Cross-Domain-Policies**: Disables Adobe Flash/PDF cross-domain policies
-
-Content Security Policy (CSP) is disabled in the backend as it's handled by the Next.js frontend.
+This folder contains the Soroban payout execution layer for winner distributions and the round state machine for game logic.
 
 ---
 
-## Feature flags and env
+## Features
+
+### 🎮 Round State Machine
+
+Deterministic, auditable round resolution with:
+
+- State transitions: `OPEN` → `CLOSED` → `RESOLVED` → `SETTLED`
+- Transactional integrity with automatic rollback
+- Prometheus metrics for monitoring
+- Admin-only resolution endpoint
+
+See [QUICKSTART_ROUNDS.md](./QUICKSTART_ROUNDS.md) for usage.
+
+### 💰 Payout Execution
+
+Soroban-based winner distribution system.
+
+### 📊 Metrics & Monitoring
+
+Prometheus-compatible metrics at `/metrics`:
+
+- HTTP request rates and latencies
+- Worker job queue lengths
+- Transaction confirmation rates
+- Round resolution metrics
+
+See [docs/METRICS.md](./docs/METRICS.md) for details.
+
+---
+
+## Quick Start
+
+### Setup
+
+```bash
+npm install
+npm run migrate:dev
+npm run dev
+```
+
+### Run Tests
+
+```bash
+npx tsx tests/round.integration.test.ts
+npx tsx tests/payment.integration.test.ts
+npx tsx tests/metrics.test.ts
+```
+
+### View Metrics
+
+```bash
+curl http://localhost:3001/metrics
+```
+
+### Start Monitoring
+
+```bash
+docker-compose -f docker-compose.monitoring.yml up -d
+```
+
+- **Prometheus**: http://localhost:9090
+- **Grafana**: http://localhost:3000 (admin/admin)
+
+---
+
+## Environment Configuration
+
+For a full reference of every environment variable (including defaults and required/optional status), see **[docs/ENVIRONMENT.md](../docs/ENVIRONMENT.md)**.
 
 Set these values in deployment secrets (never commit private keys):
 
-- `PAYOUTS_LIVE_EXECUTION` (`true`/`false`): submit transactions to Soroban when `true`.
-- `PAYOUTS_SIGN_WITH_HOT_KEY` (`true`/`false`): enable hot-key signing in service.
-- `PAYOUT_HOT_SIGNER_SECRET`: optional hot signer secret (only for controlled environments).
-- `PAYOUTS_MAX_GAS_STROOPS`: max accepted prepared transaction fee.
-- `PAYOUTS_MAX_ATTEMPTS`: max worker submit retries before marking failed.
-- `PAYOUTS_CONFIRM_POLL_MS`: confirmation polling interval.
-- `PAYOUTS_CONFIRM_MAX_POLLS`: max confirmation polls.
-- `PAYOUT_CONTRACT_ID`: Soroban payout contract.
-- `PAYOUT_METHOD_NAME`: contract method (default `distribute_winnings`).
-- `PAYOUT_SOURCE_ACCOUNT`: payout source account.
-- `STELLAR_NETWORK_PASSPHRASE`: network passphrase.
-- `SOROBAN_RPC_URL`: Soroban RPC endpoint.
+### Round System
 
-## Key management approach
+- `DATABASE_URL`: PostgreSQL connection string for Prisma
 
-- Preferred production mode: `PAYOUTS_SIGN_WITH_HOT_KEY=false`.
-- Build unsigned XDR server-side, then sign in an external KMS/HSM signer.
-- Return signed XDR to `queueSignedTransaction` for worker submission.
-- If hot signing is enabled, keep `PAYOUT_HOT_SIGNER_SECRET` in secret manager only.
+### Payout System
+
+- `PAYOUTS_LIVE_EXECUTION` (`true`/`false`): Submit transactions to Soroban when `true`
+- `PAYOUTS_SIGN_WITH_HOT_KEY` (`true`/`false`): Enable hot-key signing in service
+- `PAYOUT_HOT_SIGNER_SECRET`: Optional hot signer secret (only for controlled environments)
+- `PAYOUTS_MAX_GAS_STROOPS`: Max accepted prepared transaction fee
+- `PAYOUTS_MAX_ATTEMPTS`: Max worker submit retries before marking failed
+- `PAYOUTS_CONFIRM_POLL_MS`: Confirmation polling interval
+- `PAYOUTS_CONFIRM_MAX_POLLS`: Max confirmation polls
+- `PAYOUT_CONTRACT_ID`: Soroban payout contract
+- `PAYOUT_METHOD_NAME`: Contract method (default `distribute_winnings`)
+- `PAYOUT_SOURCE_ACCOUNT`: Payout source account
+- `STELLAR_NETWORK_PASSPHRASE`: Network passphrase
+- `SOROBAN_RPC_URL`: Soroban RPC endpoint
+
+---
+
+## Key Management Approach
+
+- **Preferred production mode**: `PAYOUTS_SIGN_WITH_HOT_KEY=false`
+- Build unsigned XDR server-side, then sign in an external KMS/HSM signer
+- Return signed XDR to `queueSignedTransaction` for worker submission
+- If hot signing is enabled, keep `PAYOUT_HOT_SIGNER_SECRET` in secret manager only
+
+---
+
+## API Endpoints
+
+### Arena Participants
+
+**GET /api/arenas/:id/participants**
+
+Returns a paginated list of participants in a specific arena with their status (active/eliminated).
+
+**Query Parameters:**
+- `limit` (optional): Number of items per page (1-100, default: 25)
+- `cursor` (optional): Opaque pagination cursor from previous response
+
+**Response:**
+```json
+{
+  "items": [
+    {
+      "walletAddress": "GABC...",
+      "status": "active",
+      "joinedAt": "2026-05-29T10:30:00.000Z"
+    }
+  ],
+  "cursor": "eyJvZmZzZXQiOjI1fQ",
+  "hasMore": true
+}
+```
+
+**Status Codes:**
+- `200`: Success
+- `404`: Arena not found
+
+**Cache:** 5 seconds
+
+---
+
+## Documentation
+
+- **[Metrics & Monitoring](./docs/METRICS.md)** - Prometheus metrics guide
+- **[Round State Machine](./docs/ROUND_STATE_MACHINE.md)** - Architecture details
+- **[Payout Execution](./docs/PAYOUT_EXECUTION.md)** - Payment system guide
+- **[Quick Start Guide](./docs/QUICKSTART_ROUNDS.md)** - Getting started
+- **[Implementation Summary](./docs/IMPLEMENTATION_SUMMARY.md)** - Feature overview

@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+@keyframes ticker {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
 @theme {
   --color-neon-green: #37FF1C;
   --color-neon-pink: #FF0055;
@@ -70,6 +75,36 @@ body {
   font-family: var(--font-pixel), monospace;
 }
 
+.pool-success-modal-scrollbar {
+  scrollbar-width: thin;
+  /* Firefox */
+  scrollbar-color: #00FF00 #131810;
+  /* thumb and track color */
+}
+
+.pool-success-modal-scrollbar::-webkit-scrollbar {
+  width: 4px;
+  /* Slim width */
+}
+
+.pool-success-modal-scrollbar::-webkit-scrollbar-track {
+  background: #131810;
+  /* Dark track to match background */
+}
+
+.pool-success-modal-scrollbar::-webkit-scrollbar-thumb {
+  background-color: #00FF00;
+  /* Green thumb */
+  border-radius: 0;
+  /* Sharp edges to match the design */
+  border: none;
+}
+
+.pool-success-modal-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: #00DD00;
+  /* Slightly lighter on hover */
+}
+
 /* ── Neubrutalist utilities (Waiting Room) ── */
 .neubrutalist-border {
   border: 3px solid #000000;
@@ -78,10 +113,12 @@ body {
 .neubrutalist-button {
   transition: transform 0.1s, box-shadow 0.1s;
 }
+
 .neubrutalist-button:hover {
   transform: translate(-2px, -2px);
   box-shadow: 4px 4px 0px #000000;
 }
+
 .neubrutalist-button:active {
   transform: translate(0px, 0px);
   box-shadow: 0px 0px 0px #000000;
@@ -96,10 +133,22 @@ body {
 .waiting-scrollbar::-webkit-scrollbar {
   width: 12px;
 }
+
 .waiting-scrollbar::-webkit-scrollbar-track {
   background: #000000;
 }
+
 .waiting-scrollbar::-webkit-scrollbar-thumb {
   background: #39FF14;
   border: 2px solid #000000;
+}
+
+/* ── Arena V2 ── */
+
+:root {
+  --arena-green: #00ff41;
+  --arena-pink: #ff3d6b;
+  --arena-bg: #0a0a0a;
+  --arena-border: #1a1a1a;
+  --arena-border-accent: #333;
 }
