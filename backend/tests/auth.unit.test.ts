@@ -22,16 +22,33 @@ test("AuthService.requestNonce: successful request", async () => {
   
   // Mock NonceModel.create
   const mockCreate = mock.method(NonceModel, "create", async () => ({}));
+  const mockUpdateMany = mock.method(NonceModel, "updateMany", async () => ({}));
 
   const result = await authService.requestNonce(walletAddress);
 
   assert.strictEqual(typeof result.nonce, "string");
   assert.ok(result.nonce.startsWith("Sign this message to authenticate"));
   assert.ok(result.expiresAt instanceof Date);
+  assert.strictEqual(mockUpdateMany.mock.callCount(), 1);
   assert.strictEqual(mockCreate.mock.callCount(), 1);
   
-  const callParams = mockCreate.mock.calls[0].arguments[0] as { walletAddress: string };
-  assert.strictEqual(callParams.walletAddress, walletAddress);
+  const updateParams = mockUpdateMany.mock.calls[0].arguments[0] as Record<string, unknown>;
+  assert.strictEqual(updateParams.walletAddress, walletAddress);
+  assert.strictEqual(updateParams.used, false);
+
+  const createParams = mockCreate.mock.calls[0].arguments[0] as { walletAddress: string };
+  assert.strictEqual(createParams.walletAddress, walletAddress);
+});
+
+test("AuthService.requestNonce: invalidates prior nonces before creating a new one", async () => {
+  const walletAddress = VALID_ADDRESS;
+  const mockUpdateMany = mock.method(NonceModel, "updateMany", async () => ({}));
+  const mockCreate = mock.method(NonceModel, "create", async () => ({}));
+
+  await authService.requestNonce(walletAddress);
+
+  assert.strictEqual(mockUpdateMany.mock.callCount(), 1);
+  assert.strictEqual(mockCreate.mock.callCount(), 1);
 });
 
 test("AuthService.verifySignatureAndLogin: successful login", async () => {
