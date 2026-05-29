@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useState, useEffect, useCallback } from "react";
 import {
   Timer,
@@ -7,8 +8,6 @@ import {
   TensionBar,
   ChooseYourFate,
   TotalYieldPot,
-  RoundResolvedOverlay,
-  EliminationSummaryOverlay,
 } from "@/components/arena/core";
 import { useWallet } from "@/shared-d/hooks/useWallet";
 import { TransactionModal } from "@/components/modals/TransactionModal";
@@ -20,6 +19,15 @@ import {
   submitSignedTransaction,
   fetchArenaState
 } from "@/shared-d/utils/stellar-transactions";
+
+const RoundResolvedOverlay = dynamic(
+  () => import("@/components/arena/core/RoundResolvedOverlay"),
+  { ssr: false },
+);
+const EliminationSummaryOverlay = dynamic(
+  () => import("@/components/arena/core/EliminationSummaryOverlay"),
+  { ssr: false },
+);
 
 export default function ArenaPage() {
   const { isConnected, address, connect, signTransaction, refreshBalance } = useWallet();
