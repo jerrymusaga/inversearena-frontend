@@ -63,6 +63,7 @@ impl PayoutContract {
 
     /// Multi-recipient batch payout in a single transaction. All amounts are
     /// validated before any transfer, and the batch is idempotent on `payout_id`.
+    /// Duplicate recipient addresses are rejected to prevent double-payment.
     pub fn distribute_batch(
         env: Env,
         payout_id: u64,
@@ -74,10 +75,15 @@ impl PayoutContract {
         if recipients.is_empty() {
             return Err(PayoutError::EmptyBatch);
         }
-        for (_, amount) in recipients.iter() {
+        let mut seen: Vec<Address> = Vec::new(&env);
+        for (recipient, amount) in recipients.iter() {
             if amount <= 0 {
                 return Err(PayoutError::InvalidAmount);
             }
+            if seen.contains(&recipient) {
+                return Err(PayoutError::DuplicateRecipient);
+            }
+            seen.push_back(recipient);
         }
         if PayoutStorage::is_paid(&env, payout_id) {
             return Err(PayoutError::AlreadyPaid);
@@ -194,6 +200,20 @@ mod test {
         let fx = setup(1_000);
         let recipients: Vec<(Address, i128)> = Vec::new(&fx.env);
         assert!(fx.client.try_distribute_batch(&1, &recipients).is_err());
+    }
+
+    #[test]
+    fn distribute_batch_rejects_duplicate_recipients() {
+        let fx = setup(1_000);
+        let a = Address::generate(&fx.env);
+
+        let mut recipients = Vec::new(&fx.env);
+        recipients.push_back((a.clone(), 200i128));
+        recipients.push_back((a.clone(), 300i128));
+        let err = fx.client.try_distribute_batch(&1, &recipients);
+        assert!(err.is_err());
+        // Recipient should not have received any payment.
+        assert_eq!(fx.token.balance(&a), 0);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::types::{ArenaConfig, ArenaError, Choice, PlayerState, RoundResult, YieldSnapshot};
+use crate::types::{ArenaConfig, ArenaError, Choice, PendingAdmin, PlayerState, RoundResult, YieldSnapshot};
 use soroban_sdk::{Address, BytesN, Env, Vec, contracttype, symbol_short};
 
 const PENDING_ADMIN_KEY: &str = "PENDING_ADMIN";
@@ -196,7 +196,22 @@ impl ArenaStorage {
             .persistent()
             .set(&DataKey::PrizeClaimed, &true);
     }
-}
 
-// Silence unused-import warnings until the full contract is wired up
-const _: &str = PENDING_ADMIN_KEY;
+    pub fn save_pending_admin(env: &Env, pending: &PendingAdmin) {
+        env.storage()
+            .persistent()
+            .set(&symbol_short!("PADMIN"), pending);
+    }
+
+    pub fn load_pending_admin(env: &Env) -> Option<PendingAdmin> {
+        env.storage()
+            .persistent()
+            .get(&symbol_short!("PADMIN"))
+    }
+
+    pub fn delete_pending_admin(env: &Env) {
+        env.storage()
+            .persistent()
+            .remove(&symbol_short!("PADMIN"));
+    }
+}

@@ -19,8 +19,16 @@ const ADMIN_KEY: &str = "ADMIN";
 #[contractimpl]
 impl OracleContract {
     /// Initialise the oracle with an admin and an initial yield rate.
+    /// Reverts if the oracle has already been initialised.
     pub fn initialize(env: Env, admin: Address, initial_rate_bps: u32) {
         admin.require_auth();
+        if env
+            .storage()
+            .persistent()
+            .has(&soroban_sdk::symbol_short!("ADMIN"))
+        {
+            panic!("already initialised");
+        }
         env.storage()
             .persistent()
             .set(&soroban_sdk::symbol_short!("ADMIN"), &admin);
@@ -71,6 +79,22 @@ mod tests {
         let client = OracleContractClient::new(&env, &contract_id);
 
         client.initialize(&admin, &500);
+        assert_eq!(client.get_current_yield_bps(), 500);
+    }
+
+    #[test]
+    fn initialize_twice_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(OracleContract, ());
+        let admin = Address::generate(&env);
+        let other = Address::generate(&env);
+        let client = OracleContractClient::new(&env, &contract_id);
+
+        client.initialize(&admin, &500);
+        let result = client.try_initialize(&other, &300);
+        assert!(result.is_err());
+        // Original rate should be unchanged after rejected second call.
         assert_eq!(client.get_current_yield_bps(), 500);
     }
 

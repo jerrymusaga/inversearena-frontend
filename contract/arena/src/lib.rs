@@ -13,7 +13,7 @@ mod types;
 use events::ArenaEvents;
 use rwa_adapter::RwaAdapterClient;
 use storage::ArenaStorage;
-use types::{ArenaConfig, ArenaError, Choice, GameState, PlayerState, RoundResult, YieldSnapshot};
+use types::{ArenaConfig, ArenaError, Choice, GameState, PendingAdmin, PlayerState, RoundResult, YieldSnapshot};
 
 const PAGE_SIZE: u32 = 50;
 
@@ -136,17 +136,15 @@ impl ArenaContract {
 
     pub fn get_players(env: Env, page: u32) -> Vec<(Address, PlayerState)> {
         let all = ArenaStorage::load_all_players(&env);
-        let len = all.len();
-        let start = page.saturating_mul(PAGE_SIZE);
-        let end = start.saturating_add(PAGE_SIZE).min(len);
+        let start = (page.saturating_mul(PAGE_SIZE)) as usize;
+        let end = (start.saturating_add(PAGE_SIZE as usize)).min(all.len() as usize);
 
         let mut result: Vec<(Address, PlayerState)> = Vec::new(&env);
-        let mut i = start;
-        while i < end {
-            let addr = all.get(i).unwrap();
-            let state = ArenaStorage::load_player(&env, &addr).unwrap_or_default();
-            result.push_back((addr, state));
-            i += 1;
+        for i in start..end {
+            if let Some(addr) = all.get(i as u32) {
+                let state = ArenaStorage::load_player(&env, &addr).unwrap_or_default();
+                result.push_back((addr, state));
+            }
         }
         result
     }
@@ -279,6 +277,31 @@ impl ArenaContract {
         Ok(())
     }
 
+    /// Propose a new admin. The current admin calls this to start the transfer.
+    /// The new admin must then call `accept_admin` to complete the transfer.
+    pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), ArenaError> {
+        let config = ArenaStorage::load_config(&env)?;
+        config.admin.require_auth();
+        ArenaStorage::save_pending_admin(&env, &PendingAdmin { new_admin });
+        Ok(())
+    }
+
+    /// Accept a pending admin transfer. Only the proposed new admin can call this.
+    pub fn accept_admin(env: Env) -> Result<(), ArenaError> {
+        let pending = ArenaStorage::load_pending_admin(&env)
+            .ok_or(ArenaError::NoPendingAdmin)?;
+        pending.new_admin.require_auth();
+        let mut config = ArenaStorage::load_config(&env)?;
+        let old_admin = config.admin.clone();
+        config.admin = pending.new_admin;
+        ArenaStorage::save_config(&env, &config);
+        ArenaStorage::delete_pending_admin(&env);
+        ArenaEvents::admin_changed(&env, &old_admin, &config.admin.clone());
+        Ok(())
+    }
+
+    /// Immediate single-step admin transfer (deprecated — use propose_admin /
+    /// accept_admin instead). Kept for backward compatibility.
     pub fn change_admin(env: Env, new_admin: Address) -> Result<(), ArenaError> {
         let mut config = ArenaStorage::load_config(&env)?;
         config.admin.require_auth();
@@ -883,5 +906,101 @@ mod test {
             .expect("eliminated player claim must error")
             .expect("error must be a contract error");
         assert_eq!(err, ArenaError::PlayerEliminated);
+    }
+
+    #[test]
+    fn propose_then_accept_admin_changes_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: admin.clone(),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
+                oracle_contract: Address::generate(&env),
+            };
+            ArenaStorage::save_config(&env, &config);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        client.propose_admin(&new_admin);
+        client.accept_admin();
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaStorage::load_config(&env).unwrap();
+            assert_eq!(config.admin, new_admin);
+        });
+    }
+
+    #[test]
+    fn accept_without_propose_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let admin = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: admin.clone(),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
+                oracle_contract: Address::generate(&env),
+            };
+            ArenaStorage::save_config(&env, &config);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        let err = client
+            .try_accept_admin()
+            .err()
+            .expect("accept without propose must error")
+            .expect("error must be a contract error");
+        assert_eq!(err, ArenaError::NoPendingAdmin);
+    }
+
+    #[test]
+    fn propose_admin_updates_pending_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: admin.clone(),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 0,
+                yield_vault: Address::generate(&env),
+                round_count: 0,
+                oracle_contract: Address::generate(&env),
+            };
+            ArenaStorage::save_config(&env, &config);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        client.propose_admin(&new_admin);
+
+        env.as_contract(&contract_id, || {
+            let pending = ArenaStorage::load_pending_admin(&env).unwrap();
+            assert_eq!(pending.new_admin, new_admin);
+        });
     }
 }

@@ -133,4 +133,6 @@ pub enum ArenaError {
     PrizeAlreadyClaimed = 12,
     /// Player was eliminated and cannot perform this action.
     PlayerEliminated = 13,
+    /// No pending admin transfer to accept.
+    NoPendingAdmin = 14,
 }
