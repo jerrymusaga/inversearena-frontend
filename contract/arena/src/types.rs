@@ -48,6 +48,8 @@ pub struct ArenaConfig {
     /// Total number of players that have ever joined this arena. Kept in sync
     /// by `ArenaStorage::add_player` so it can be read without scanning storage.
     pub player_count: u32,
+    /// Cumulative yield accrued across all resolved rounds.
+    pub cumulative_yield: i128,
     /// Ledger timestamp (seconds) after which commitments are no longer
     /// accepted and the reveal phase begins.
     pub commit_deadline: u64,

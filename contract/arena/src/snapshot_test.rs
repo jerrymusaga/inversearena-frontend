@@ -76,6 +76,7 @@ mod snapshot_tests {
             entry_fee: 100,
             state: GameState::Open,
             player_count: 42,
+            cumulative_yield: 0,
             commit_deadline: 1_730_000_000,
             round_count: 0,
             oracle_contract: Address::generate(&env),
@@ -87,6 +88,7 @@ mod snapshot_tests {
             entry_fee: 200, // differs from config_a
             state: GameState::Open,
             player_count: 42,
+            cumulative_yield: 0,
             commit_deadline: 1_730_000_000,
             round_count: 0,
             oracle_contract: Address::generate(&env),

@@ -13,7 +13,10 @@ mod types;
 use events::ArenaEvents;
 use rwa_adapter::RwaAdapterClient;
 use storage::ArenaStorage;
-use types::{ArenaConfig, ArenaError, Choice, GameState, PendingAdmin, PlayerState, RoundResult, YieldSnapshot};
+use types::{
+    ArenaConfig, ArenaError, Choice, GameState, PendingAdmin, PlayerState, RoundResult,
+    YieldSnapshot,
+};
 
 const PAGE_SIZE: u32 = 50;
 
@@ -42,6 +45,7 @@ impl ArenaContract {
             entry_fee,
             state: GameState::Open,
             player_count: 0,
+            cumulative_yield: 0,
             commit_deadline: 0,
             round_count: 0,
             oracle_contract,
@@ -206,6 +210,7 @@ impl ArenaContract {
         ArenaStorage::save_round_yield_bps(&env, round, yield_bps);
         ArenaStorage::save_yield_snapshot(&env, round, &snapshot);
         ArenaStorage::save_last_vault_balance(&env, vault_balance);
+        config.cumulative_yield = config.cumulative_yield.saturating_add(accrued);
 
         let (eliminated, survivors, winner) = Self::resolve_players(&env, round);
         let result = RoundResult {
@@ -288,8 +293,7 @@ impl ArenaContract {
 
     /// Accept a pending admin transfer. Only the proposed new admin can call this.
     pub fn accept_admin(env: Env) -> Result<(), ArenaError> {
-        let pending = ArenaStorage::load_pending_admin(&env)
-            .ok_or(ArenaError::NoPendingAdmin)?;
+        let pending = ArenaStorage::load_pending_admin(&env).ok_or(ArenaError::NoPendingAdmin)?;
         pending.new_admin.require_auth();
         let mut config = ArenaStorage::load_config(&env)?;
         let old_admin = config.admin.clone();
@@ -313,18 +317,9 @@ impl ArenaContract {
     }
 
     pub fn get_total_yield(env: Env) -> i128 {
-        let round_count = ArenaStorage::load_config(&env)
-            .map(|c| c.round_count)
-            .unwrap_or(0);
-        let mut total = 0i128;
-        let mut round = 1u32;
-        while round <= round_count {
-            if let Some(snapshot) = ArenaStorage::load_yield_snapshot(&env, round) {
-                total = total.saturating_add(snapshot.accrued);
-            }
-            round += 1;
-        }
-        total
+        ArenaStorage::load_config(&env)
+            .map(|c| c.cumulative_yield)
+            .unwrap_or(0)
     }
 
     pub fn get_yield_snapshot(env: Env, round: u32) -> Option<YieldSnapshot> {
@@ -438,6 +433,7 @@ mod test {
                 entry_fee: 100,
                 state: GameState::Open,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: u64::MAX,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -516,6 +512,7 @@ mod test {
                 entry_fee: 100,
                 state: GameState::Open,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -550,6 +547,7 @@ mod test {
                 entry_fee: 100,
                 state: GameState::Open,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -580,6 +578,7 @@ mod test {
                 entry_fee: 100,
                 state: GameState::Open,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 1,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -611,6 +610,7 @@ mod test {
                 entry_fee: 100,
                 state: GameState::Open,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -641,6 +641,7 @@ mod test {
                 entry_fee: 100,
                 state: GameState::Open,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -666,6 +667,7 @@ mod test {
                 entry_fee: 100,
                 state: GameState::Open,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -713,6 +715,7 @@ mod test {
                 entry_fee: 100,
                 state: GameState::Open,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -750,6 +753,7 @@ mod test {
         env.as_contract(&client.address, || {
             let mut config = ArenaStorage::load_config(&env).unwrap();
             config.round_count = 3;
+            config.cumulative_yield = 60;
             ArenaStorage::save_config(&env, &config);
             for round in 1..=3 {
                 ArenaStorage::save_yield_snapshot(
@@ -784,6 +788,7 @@ mod test {
                     entry_fee: 100,
                     state: GameState::Open,
                     player_count: 1,
+                    cumulative_yield: 0,
                     commit_deadline: 0,
                     yield_vault: vault_id.clone(),
                     round_count: 0,
@@ -836,6 +841,7 @@ mod test {
                     entry_fee: 100,
                     state: GameState::Finished,
                     player_count: 1,
+                    cumulative_yield: 0,
                     commit_deadline: 0,
                     yield_vault: Address::generate(&env),
                     round_count: 0,
@@ -883,6 +889,7 @@ mod test {
                     entry_fee: 100,
                     state: GameState::Finished,
                     player_count: 1,
+                    cumulative_yield: 0,
                     commit_deadline: 0,
                     yield_vault: Address::generate(&env),
                     round_count: 0,
@@ -923,6 +930,7 @@ mod test {
                 entry_fee: 100,
                 state: GameState::Open,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -955,6 +963,7 @@ mod test {
                 entry_fee: 100,
                 state: GameState::Open,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -987,6 +996,7 @@ mod test {
                 entry_fee: 100,
                 state: GameState::Open,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
