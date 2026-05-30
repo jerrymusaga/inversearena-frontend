@@ -5,8 +5,6 @@ use crate::types::{
 };
 use soroban_sdk::{Address, BytesN, Env, Vec, contracttype, symbol_short};
 
-const PENDING_ADMIN_KEY: &str = "PENDING_ADMIN";
-
 /// Storage key for per-player data, keyed by the player's address.
 #[contracttype]
 enum DataKey {
