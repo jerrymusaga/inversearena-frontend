@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useState, useEffect, useCallback } from "react";
 import { ErrorBoundary } from "@/components/error-boundary/ErrorBoundary";
 import { ErrorFallback } from "@/components/error-boundary/ErrorFallback";
@@ -9,8 +10,6 @@ import {
   TensionBar,
   ChooseYourFate,
   TotalYieldPot,
-  RoundResolvedOverlay,
-  EliminationSummaryOverlay,
 } from "@/components/arena/core";
 import { useWallet } from "@/shared-d/hooks/useWallet";
 import { TransactionModal } from "@/components/modals/TransactionModal";
@@ -30,6 +29,15 @@ const DEMO_ELIMINATION_FEED = [
   { id: "demo-3", label: "K-0001-A", roundNumber: 1, status: "OUT" as const, createdAt: "2026-05-29T00:00:00.000Z" },
   { id: "demo-4", label: "S-9921-W", roundNumber: 1, status: "ACTIVE" as const, createdAt: "2026-05-29T00:00:00.000Z" },
 ];
+
+const RoundResolvedOverlay = dynamic(
+  () => import("@/components/arena/core/RoundResolvedOverlay"),
+  { ssr: false },
+);
+const EliminationSummaryOverlay = dynamic(
+  () => import("@/components/arena/core/EliminationSummaryOverlay").then((m) => ({ default: m.EliminationSummaryOverlay })),
+  { ssr: false },
+);
 
 export default function ArenaPage() {
   return (

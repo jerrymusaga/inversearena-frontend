@@ -18,16 +18,7 @@ export class RoundRepository {
       },
     });
 
-    return {
-      id: round.id,
-      arenaId: round.arenaId,
-      roundNumber: round.roundNumber,
-      state: round.state as RoundState,
-      playerChoices: [],
-      createdAt: round.createdAt,
-      updatedAt: round.updatedAt,
-      ...this.mapRound(round),
-    };
+    return this.mapRound(round);
   }
 
   async findById(roundId: string): Promise<RoundData | null> {
@@ -38,16 +29,6 @@ export class RoundRepository {
     if (!round) return null;
 
     return this.mapRound(round);
-  }
-
-  async updateState(roundId: string, state: RoundState): Promise<void> {
-    await this.prisma.round.update({
-      where: { id: roundId },
-      data: {
-        state,
-        updatedAt: new Date(),
-      },
-    });
   }
 
   async saveResolution(
@@ -82,16 +63,12 @@ export class RoundRepository {
     limit: number,
     cursor?: string,
   ): Promise<PaginatedResult<RoundData>> {
+    const offset = cursor ? this.decodeCursor(cursor) : 0;
     const rounds = await this.prisma.round.findMany({
       where: { arenaId },
-      orderBy: [{ roundNumber: 'desc' }, { id: 'desc' }],
+      orderBy: [{ roundNumber: 'asc' }, { id: 'asc' }],
       take: limit + 1,
-      ...(cursor
-        ? {
-            skip: 1,
-            cursor: { id: cursor },
-          }
-        : {}),
+      skip: offset,
     });
 
     const hasMore = rounds.length > limit;
@@ -99,9 +76,23 @@ export class RoundRepository {
 
     return {
       items,
-      cursor: hasMore ? items[items.length - 1]?.id ?? null : null,
+      cursor: hasMore ? this.encodeCursor(offset + limit) : null,
       hasMore,
     };
+  }
+
+  private encodeCursor(offset: number): string {
+    return Buffer.from(JSON.stringify({ offset })).toString('base64url');
+  }
+
+  private decodeCursor(cursor: string): number {
+    try {
+      const payload = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf-8')) as { offset: number };
+      if (typeof payload.offset !== 'number' || payload.offset < 0) return 0;
+      return payload.offset;
+    } catch {
+      return 0;
+    }
   }
 
   async findByArenaAndNumber(
@@ -182,6 +173,8 @@ export class RoundRepository {
       where: { id: roundId },
       data: { state, updatedAt: new Date() },
     });
+  }
+
   private parseState(state: string): RoundState {
     if (Object.values(RoundState).includes(state as RoundState)) {
       return state as RoundState;

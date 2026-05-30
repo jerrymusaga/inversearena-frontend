@@ -5,10 +5,35 @@ import { asyncHandler } from "../middleware/validate";
 import { cacheMiddleware } from "../middleware/cache";
 import { cacheKeys, cacheTTL } from "../cache/cacheService";
 import { prisma } from "../db/prisma";
-import { apiError } from "../utils/apiError";
+import type { CreateArenaInput } from "../types/arena";
 import { ArenaService } from "../services/arenaService";
 import { ArenaStatsService } from "../services/arenaStatsService";
+import { RoundRepository } from "../repositories/roundRepository";
+import { apiError } from "../utils/apiError";
 import type { ArenaParticipant } from "../types/arena";
+
+const PaginationSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  cursor: z.string().optional(),
+});
+
+interface DecodedCursor {
+  offset: number;
+}
+
+function encodeCursor(offset: number): string {
+  return Buffer.from(JSON.stringify({ offset } as DecodedCursor)).toString("base64url");
+}
+
+function decodeCursor(cursor: string): number {
+  try {
+    const payload = JSON.parse(Buffer.from(cursor, "base64url").toString("utf-8")) as DecodedCursor;
+    if (typeof payload.offset !== "number" || payload.offset < 0) return 0;
+    return payload.offset;
+  } catch {
+    return 0;
+  }
+}
 
 const CreateArenaSchema = z.object({
   entryFee: z.number().finite().positive(),
@@ -17,6 +42,26 @@ const CreateArenaSchema = z.object({
   stakeToken: z.string().trim().min(1).max(32),
   name: z.string().trim().min(1).max(120),
 });
+
+function formatRound(round: {
+  id: string;
+  roundNumber: number;
+  state: string;
+  createdAt: Date;
+  updatedAt: Date;
+  eliminationCount: number;
+  metadata: unknown;
+}) {
+  return {
+    id: round.id,
+    roundNumber: round.roundNumber,
+    state: round.state,
+    eliminationCount: round.eliminationCount,
+    metadata: round.metadata,
+    createdAt: round.createdAt.toISOString(),
+    updatedAt: round.updatedAt.toISOString(),
+  };
+}
 
 const ParticipantsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(12),
@@ -75,6 +120,7 @@ export function createArenasRouter(authMiddleware: RequestHandler): Router {
   const router = Router();
   const arenaService = new ArenaService(prisma);
   const arenaStatsService = new ArenaStatsService(prisma);
+  const roundRepository = new RoundRepository(prisma);
 
   /**
    * POST /api/arenas
@@ -84,7 +130,7 @@ export function createArenasRouter(authMiddleware: RequestHandler): Router {
     "/",
     authMiddleware,
     asyncHandler(async (req, res) => {
-      const input = CreateArenaSchema.parse(req.body);
+      const input = CreateArenaSchema.parse(req.body) as unknown as CreateArenaInput;
       const createdBy = req.user?.walletAddress;
 
       if (!createdBy) {
@@ -106,9 +152,12 @@ export function createArenasRouter(authMiddleware: RequestHandler): Router {
    */
   router.get(
     "/:id/stats",
-    cacheMiddleware((req) => cacheKeys.arenaStats(req.params.id!), cacheTTL.ARENA_STATS),
+    cacheMiddleware((req) => cacheKeys.arenaStats(req.params.id ?? ""), cacheTTL.ARENA_STATS),
     asyncHandler(async (req, res) => {
-      const id = req.params.id!;
+      const id = req.params.id;
+      if (!id) {
+        throw apiError(400, "INVALID_ARENA_ID", "Arena id is required");
+      }
 
       try {
         const stats = await arenaStatsService.getArenaStats(id);
@@ -119,6 +168,47 @@ export function createArenasRouter(authMiddleware: RequestHandler): Router {
         }
         throw error;
       }
+    }),
+  );
+
+  router.get(
+    "/:id/rounds",
+    authMiddleware,
+    cacheMiddleware(
+      (req) => `arena:rounds:${req.params.id}:${req.query.limit ?? 25}:${req.query.cursor ?? "0"}`,
+      cacheTTL.ARENA_ROUNDS,
+    ),
+    asyncHandler(async (req, res) => {
+      const { id } = req.params;
+      if (!id) {
+        throw apiError(400, "INVALID_ARENA_ID", "Arena id is required");
+      }
+      const { limit, cursor } = PaginationSchema.parse(req.query);
+
+      const arena = await prisma.arena.findUnique({ where: { id } });
+      if (!arena) {
+        res.status(404).json({ error: { code: "ARENA_NOT_FOUND" } });
+        return;
+      }
+
+      const result = await roundRepository.listByArenaId(id, limit, cursor);
+      const items = result.items.map((round) =>
+        formatRound({
+          id: round.id,
+          roundNumber: round.roundNumber,
+          state: round.state,
+          eliminationCount: round.metadata?.resolution?.eliminatedPlayers?.length ?? 0,
+          metadata: round.metadata,
+          createdAt: round.createdAt,
+          updatedAt: round.updatedAt,
+        }),
+      );
+
+      res.json({
+        items,
+        cursor: result.cursor,
+        hasMore: result.hasMore,
+      });
     }),
   );
 

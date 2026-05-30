@@ -60,6 +60,11 @@ export class AuthService {
     const nonce = `${NONCE_PREFIX}${rawHex}`;
     const expiresAt = new Date(Date.now() + nonceTtlSeconds() * 1000);
 
+    await NonceModel.updateMany(
+      { walletAddress, used: false, expiresAt: { $gt: new Date() } },
+      { $set: { used: true } },
+    );
+
     await NonceModel.create({ walletAddress, nonce, used: false, expiresAt });
 
     return { nonce, expiresAt };

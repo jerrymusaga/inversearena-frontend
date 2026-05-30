@@ -43,7 +43,7 @@ export function createOracleRouter(): Router {
    */
   router.post(
     "/yield",
-    verifyWebhookSignature(ORACLE_WEBHOOK_SECRET),
+    verifyWebhookSignature(ORACLE_WEBHOOK_SECRET!),
     asyncHandler(async (req, res) => {
       const { currentAPY, baseRate, surgeMultiplier, protocol, asset } =
         req.body;

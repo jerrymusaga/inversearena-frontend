@@ -1,4 +1,3 @@
-import { describe, it, expect } from "@jest/globals";
 import { scrubStellarAddresses } from "../sentry";
 import type { Event as SentryEvent } from "@sentry/nextjs";
 
@@ -20,7 +19,7 @@ describe("scrubStellarAddresses", () => {
     });
     const result = scrubStellarAddresses(event);
     expect(result).not.toBeNull();
-    expect(result!.exception!.values![0].value).toBe("Something went wrong");
+    expect(result!.exception!.values![0]!.value).toBe("Something went wrong");
   });
 
   it("replaces a public key in an exception value", () => {
@@ -33,7 +32,7 @@ describe("scrubStellarAddresses", () => {
     });
     const result = scrubStellarAddresses(event);
     expect(result).not.toBeNull();
-    expect(result!.exception!.values![0].value).toBe(
+    expect(result!.exception!.values![0]!.value).toBe(
       "Failed to submit choice for [STELLAR_ADDRESS]",
     );
   });
@@ -50,38 +49,34 @@ describe("scrubStellarAddresses", () => {
       },
     });
     const result = scrubStellarAddresses(event);
-    expect(result!.exception!.values![0].value).toBe(
+    expect(result!.exception!.values![0]!.value).toBe(
       "Transfer from [STELLAR_ADDRESS] to [STELLAR_ADDRESS] failed",
     );
   });
 
   it("replaces a public key in a breadcrumb message", () => {
     const event = makeEvent({
-      breadcrumbs: {
-        values: [
-          { type: "default", message: `Wallet connected: ${PUBLIC_KEY}` },
-        ],
-      },
+      breadcrumbs: [
+        { type: "default", message: `Wallet connected: ${PUBLIC_KEY}` },
+      ],
     });
     const result = scrubStellarAddresses(event);
-    expect(result!.breadcrumbs!.values![0].message).toBe(
+    expect(result!.breadcrumbs![0]!.message).toBe(
       "Wallet connected: [STELLAR_ADDRESS]",
     );
   });
 
   it("replaces a public key embedded in a breadcrumb URL", () => {
     const event = makeEvent({
-      breadcrumbs: {
-        values: [
-          {
-            type: "navigation",
-            data: { url: `/arena/${PUBLIC_KEY}/stats` },
-          },
-        ],
-      },
+      breadcrumbs: [
+        {
+          type: "navigation",
+          data: { url: `/arena/${PUBLIC_KEY}/stats` },
+        },
+      ],
     });
     const result = scrubStellarAddresses(event);
-    expect(result!.breadcrumbs!.values![0].data!.url).toBe(
+    expect(result!.breadcrumbs![0]!.data!.url).toBe(
       "/arena/[STELLAR_ADDRESS]/stats",
     );
   });
@@ -112,9 +107,7 @@ describe("scrubStellarAddresses", () => {
 
   it("handles breadcrumbs with no message or url without throwing", () => {
     const event = makeEvent({
-      breadcrumbs: {
-        values: [{ type: "default" }],
-      },
+      breadcrumbs: [{ type: "default" }],
     });
     expect(() => scrubStellarAddresses(event)).not.toThrow();
   });

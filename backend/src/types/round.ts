@@ -47,8 +47,8 @@ export interface RoundResolution {
 export interface RoundMetadata {
   playerChoices: PlayerChoice[];
   oracleYield: number;
-  randomSeed?: string;
-  resolution?: RoundResolution;
+  randomSeed: string | undefined;
+  resolution: RoundResolution | undefined;
 }
 
 export interface PaginatedResult<T> {
@@ -63,10 +63,10 @@ export interface RoundData {
   roundNumber: number;
   state: RoundState;
   playerChoices: PlayerChoice[];
-  oracleYield?: number;
-  randomSeed?: string;
-  resolution?: RoundResolution;
-  metadata?: RoundMetadata;
+  oracleYield: number | undefined;
+  randomSeed: string | undefined;
+  resolution: RoundResolution | undefined;
+  metadata: RoundMetadata | undefined;
   createdAt: Date;
   updatedAt: Date;
 }
