@@ -54,6 +54,11 @@ impl PayoutContract {
 
         let token_addr = PayoutStorage::get_token(&env)?;
         let client = token::TokenClient::new(&env, &token_addr);
+        // Ensure contract has sufficient balance for the payout
+        let contract_balance = client.balance(&env.current_contract_address());
+        if amount > contract_balance {
+            return Err(PayoutError::InsufficientBalance);
+        }
         client.transfer(&env.current_contract_address(), &winner, &amount);
 
         env.events()
@@ -76,6 +81,7 @@ impl PayoutContract {
             return Err(PayoutError::EmptyBatch);
         }
         let mut seen: Vec<Address> = Vec::new(&env);
+        let mut total_amount: i128 = 0;
         for (recipient, amount) in recipients.iter() {
             if amount <= 0 {
                 return Err(PayoutError::InvalidAmount);
@@ -84,6 +90,14 @@ impl PayoutContract {
                 return Err(PayoutError::DuplicateRecipient);
             }
             seen.push_back(recipient);
+            total_amount = total_amount.saturating_add(*amount);
+        }
+        // Verify contract has enough balance for total payout
+        let token_addr = PayoutStorage::get_token(&env)?;
+        let client = token::TokenClient::new(&env, &token_addr);
+        let contract_balance = client.balance(&env.current_contract_address());
+        if total_amount > contract_balance {
+            return Err(PayoutError::InsufficientBalance);
         }
         if PayoutStorage::is_paid(&env, payout_id) {
             return Err(PayoutError::AlreadyPaid);
@@ -91,8 +105,6 @@ impl PayoutContract {
 
         PayoutStorage::mark_paid(&env, payout_id);
 
-        let token_addr = PayoutStorage::get_token(&env)?;
-        let client = token::TokenClient::new(&env, &token_addr);
         let contract = env.current_contract_address();
         for (recipient, amount) in recipients.iter() {
             client.transfer(&contract, &recipient, &amount);

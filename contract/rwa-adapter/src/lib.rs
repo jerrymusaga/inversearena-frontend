@@ -33,6 +33,9 @@ impl RwaAdapter {
     }
 
     pub fn deposit(env: Env, from: Address, amount: i128) -> Result<(), RwaError> {
+        if amount <= 0 {
+            return Err(RwaError::InvalidAmount);
+        }
         let config = RwaStorage::load_config(&env)?;
 
         let mut pos = RwaStorage::load_position(&env, &from);

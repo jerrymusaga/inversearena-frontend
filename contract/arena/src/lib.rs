@@ -44,6 +44,15 @@ impl ArenaContract {
             return Err(ArenaError::AlreadyInitialized);
         }
 
+        // Validate the provided yield_vault implements the expected RWA adapter interface
+        let rwa_client = RwaAdapterClient::new(&env, &yield_vault);
+        // Attempt a harmless read to ensure the contract is reachable and implements the interface
+        // Here we use try_balance_of on the arena contract address; any error indicates an invalid vault
+        let dummy_addr = env.current_contract_address();
+        if rwa_client.try_balance_of(&dummy_addr).is_err() {
+            return Err(ArenaError::InvalidVaultAddress);
+        }
+
         let config = ArenaConfig {
             admin: admin.clone(),
             stake_token,
@@ -75,7 +84,7 @@ impl ArenaContract {
         let arena_addr = env.current_contract_address();
         token_client.transfer(&player, &arena_addr, &config.entry_fee);
 
-        let rwa_client = RwaAdapterClient::new(&env, &config.yield_vault);
+        // Attempt to deposit entry fee into vault; ignore failures
         let _ = rwa_client.try_deposit(&arena_addr, &config.entry_fee);
         let baseline = ArenaStorage::load_last_vault_balance(&env).saturating_add(config.entry_fee);
         ArenaStorage::save_last_vault_balance(&env, baseline);
@@ -215,7 +224,13 @@ impl ArenaContract {
             .try_balance_of(&arena_addr)
             .unwrap_or(Ok(previous_balance))
             .unwrap_or(previous_balance);
-        let accrued = vault_balance.saturating_sub(previous_balance);
+        let accrued = if vault_balance >= previous_balance {
+            vault_balance - previous_balance
+        } else {
+            // Emit event when vault balance decreased
+            ArenaEvents::vault_balance_decreased(&env, previous_balance, vault_balance);
+            0
+        };
         let snapshot = YieldSnapshot {
             round,
             rate_bps: yield_bps,

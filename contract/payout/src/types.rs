@@ -17,5 +17,7 @@ pub enum PayoutError {
     /// A batch payout was submitted with no recipients.
     EmptyBatch = 6,
     /// A batch contains duplicate recipient addresses.
-    DuplicateRecipient = 7,
+    InsufficientBalance = 8,
+    /// A batch contains duplicate recipient addresses.
+    DuplicateRecipient = 9,
 }
