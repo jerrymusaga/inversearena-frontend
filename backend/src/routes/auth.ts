@@ -1,6 +1,11 @@
 import { Router } from "express";
 import { asyncHandler } from "../middleware/validate";
-import { createRateLimitMiddleware, nonceRateLimitConfig } from "../middleware/rateLimit";
+import {
+  createRateLimitMiddleware,
+  getNonceRateLimitConfig,
+  getRefreshRateLimitConfig,
+  getVerifyRateLimitConfig,
+} from "../middleware/rateLimit";
 import type { AuthController } from "../controllers/auth.controller";
 import type { RequestHandler } from "express";
 
@@ -10,12 +15,14 @@ export function createAuthRouter(
 ): Router {
   const router = Router();
 
-  const nonceRateLimiter = createRateLimitMiddleware(nonceRateLimitConfig);
+  const nonceRateLimiter = createRateLimitMiddleware(getNonceRateLimitConfig());
+  const verifyRateLimiter = createRateLimitMiddleware(getVerifyRateLimitConfig());
+  const refreshRateLimiter = createRateLimitMiddleware(getRefreshRateLimitConfig());
 
   // Public endpoints
   router.post("/nonce", nonceRateLimiter, asyncHandler(controller.requestNonce));
-  router.post("/verify", asyncHandler(controller.verify));
-  router.post("/refresh", asyncHandler(controller.refresh));
+  router.post("/verify", verifyRateLimiter, asyncHandler(controller.verify));
+  router.post("/refresh", refreshRateLimiter, asyncHandler(controller.refresh));
 
   // Protected — requires valid JWT
   router.get("/me", authMiddleware, asyncHandler(controller.me));
