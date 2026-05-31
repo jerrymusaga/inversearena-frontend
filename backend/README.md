@@ -105,6 +105,22 @@ Set these values in deployment secrets (never commit private keys):
 
 ---
 
+## API Documentation
+
+- **OpenAPI spec**: `GET /api/docs.json` (OpenAPI 3.1, generated from Zod schemas)
+- **Swagger UI**: `GET /api/docs`
+
+## Rate Limiting
+
+Redis-backed limits (`rate-limiter-flexible`) apply to:
+
+- `POST /api/auth/nonce`
+- `POST /api/auth/verify` (IP + wallet dual scope)
+- `POST /api/auth/refresh`
+- `POST /api/pools`
+
+Violations return HTTP `429` with a `Retry-After` header. Configure via `RATE_LIMIT_*` env vars (see `.env.example`).
+
 ## API Endpoints
 
 ### Arena Participants

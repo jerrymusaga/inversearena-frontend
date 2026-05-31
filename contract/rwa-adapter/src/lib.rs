@@ -207,7 +207,6 @@ mod test {
                 &from,
                 &types::YieldAccrual {
                     principal: 100,
-                    accrued_yield: 0,
                     withdrawn: false,
                 },
             );

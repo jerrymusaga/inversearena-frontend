@@ -43,7 +43,6 @@ impl RwaStorage {
             .get(&DataKey::Position(user.clone()))
             .unwrap_or(YieldAccrual {
                 principal: 0,
-                accrued_yield: 0,
                 withdrawn: false,
             })
     }

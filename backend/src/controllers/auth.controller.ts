@@ -1,29 +1,12 @@
 import type { NextFunction, Request, Response } from "express";
-import { z } from "zod";
 import type { AuthService } from "../services/authService";
 import { UserModel } from "../db/models/user.model";
 import { apiError } from "../utils/apiError";
-
-const PUBLIC_KEY_REGEX = /^G[A-Z2-7]{55}$/;
-
-const NonceRequestSchema = z.object({
-  walletAddress: z
-    .string()
-    .trim()
-    .regex(PUBLIC_KEY_REGEX, "Invalid Stellar wallet address"),
-});
-
-const VerifySchema = z.object({
-  walletAddress: z
-    .string()
-    .trim()
-    .regex(PUBLIC_KEY_REGEX, "Invalid Stellar wallet address"),
-  signature: z.string().min(1, "Signature is required"),
-});
-
-const RefreshSchema = z.object({
-  refreshToken: z.string().min(1, "Refresh token is required"),
-});
+import {
+  NonceRequestSchema,
+  RefreshSchema,
+  VerifySchema,
+} from "../validation/authSchemas";
 
 export class AuthController {
   constructor(private readonly authService: AuthService) {}

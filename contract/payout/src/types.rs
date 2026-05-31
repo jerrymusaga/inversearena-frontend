@@ -16,8 +16,10 @@ pub enum PayoutError {
     InvalidAmount = 5,
     /// A batch payout was submitted with no recipients.
     EmptyBatch = 6,
-    /// A batch contains duplicate recipient addresses.
+    /// Contract token balance is insufficient for the payout total.
     InsufficientBalance = 8,
     /// A batch contains duplicate recipient addresses.
     DuplicateRecipient = 9,
+    /// Batch recipient count exceeds the configured maximum.
+    BatchTooLarge = 10,
 }

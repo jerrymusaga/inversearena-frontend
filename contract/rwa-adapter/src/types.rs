@@ -12,7 +12,6 @@ pub struct RwaConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct YieldAccrual {
     pub principal: i128,
-    pub accrued_yield: i128,
     pub withdrawn: bool,
 }
 

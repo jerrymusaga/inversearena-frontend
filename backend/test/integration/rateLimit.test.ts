@@ -145,3 +145,63 @@ describe("Rate limiting on POST /api/pools", () => {
         expect(retryAfter).toBeGreaterThanOrEqual(1);
     });
 });
+
+const VERIFY_IP = "10.2.0.1";
+
+describe("Rate limiting on POST /api/auth/verify", () => {
+    let app: ReturnType<typeof setupTestApp>;
+
+    beforeAll(() => {
+        process.env.RATE_LIMIT_VERIFY_POINTS = "2";
+        process.env.RATE_LIMIT_VERIFY_WINDOW_SECONDS = "60";
+        process.env.RATE_LIMIT_VERIFY_PREFIX = "rl:test:verify:ci";
+        clearLimiterCache();
+        app = setupTestApp();
+    });
+
+    afterAll(() => {
+        clearLimiterCache();
+        delete process.env.RATE_LIMIT_VERIFY_POINTS;
+        delete process.env.RATE_LIMIT_VERIFY_WINDOW_SECONDS;
+        delete process.env.RATE_LIMIT_VERIFY_PREFIX;
+    });
+
+    it("returns 429 with Retry-After after exceeding the verify limit", async () => {
+        const keypair = Keypair.random();
+        const walletAddress = keypair.publicKey();
+        const limit = parseInt(process.env.RATE_LIMIT_VERIFY_POINTS ?? "2", 10);
+
+        let lastRes: request.Response | undefined;
+
+        for (let i = 0; i <= limit; i++) {
+            lastRes = await request(app)
+                .post("/api/auth/verify")
+                .set("X-Forwarded-For", VERIFY_IP)
+                .send({ walletAddress, signature: "invalid-signature" });
+        }
+
+        expect(lastRes!.status).toBe(429);
+        expect(lastRes!.headers["retry-after"]).toBeDefined();
+        expect(Number(lastRes!.headers["retry-after"])).toBeGreaterThanOrEqual(1);
+    });
+
+    it("scopes verify limits by wallet independently of IP", async () => {
+        const otherWallet = Keypair.random().publicKey();
+        const res = await request(app)
+            .post("/api/auth/verify")
+            .set("X-Forwarded-For", VERIFY_IP)
+            .send({ walletAddress: otherWallet, signature: "invalid" });
+
+        expect(res.status).not.toBe(429);
+    });
+
+    it("a different IP is not affected by an exhausted verify limit", async () => {
+        const keypair = Keypair.random();
+        const res = await request(app)
+            .post("/api/auth/verify")
+            .set("X-Forwarded-For", "10.2.0.99")
+            .send({ walletAddress: keypair.publicKey(), signature: "invalid" });
+
+        expect(res.status).not.toBe(429);
+    });
+});
