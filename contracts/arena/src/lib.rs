@@ -8,9 +8,9 @@ mod errors;
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, Address, Env};
+use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
 use storage::ArenaStorage;
-use types::{ArenaConfig, GameState};
+use types::{ArenaConfig, GameState, Choice, RoundResult};
 use events::ArenaEvents;
 use errors::ArenaError;
 
@@ -179,6 +179,8 @@ impl ArenaContract {
 
         player.require_auth();
 
+        ArenaStorage::add_player(&env, &player);
+
         config.player_count += 1;
         ArenaStorage::save_config(&env, &config);
 
@@ -191,4 +193,173 @@ impl ArenaContract {
         let config = ArenaStorage::load_config(&env)?;
         Ok(config.player_count)
     }
+
+    /// Submit a choice for the current round
+    pub fn submit_choice(env: Env, player: Address, choice: Choice) -> Result<(), ArenaError> {
+        let config = ArenaStorage::load_config(&env)?;
+        if config.state != GameState::InProgress {
+            return Err(ArenaError::InvalidStateTransition);
+        }
+
+        // Verify player exists and is active
+        let players = ArenaStorage::load_all_players(&env);
+        if !players.contains(&player) {
+            return Err(ArenaError::NotAPlayer);
+        }
+        if !ArenaStorage::is_player_active(&env, &player) {
+            return Err(ArenaError::PlayerEliminated);
+        }
+
+        player.require_auth();
+
+        ArenaStorage::save_player_choice(&env, &player, &choice);
+
+        // Emit choice submitted event
+        ArenaEvents::choice_submitted(&env, &player);
+
+        Ok(())
+    }
+
+    /// Resolve the current round based on minority wins / coin flip
+    pub fn resolve_round(env: Env) -> Result<RoundResult, ArenaError> {
+        let mut config = ArenaStorage::load_config(&env)?;
+        if config.state != GameState::InProgress {
+            return Err(ArenaError::InvalidStateTransition);
+        }
+
+        let players = ArenaStorage::load_all_players(&env);
+        let mut active_players = Vec::new(&env);
+        let mut heads_count = 0u32;
+        let mut tails_count = 0u32;
+
+        for player in players.iter() {
+            if ArenaStorage::is_player_active(&env, &player) {
+                active_players.push_back(player.clone());
+                if let Some(choice) = ArenaStorage::load_player_choice(&env, &player) {
+                    match choice {
+                        Choice::Heads => heads_count += 1,
+                        Choice::Tails => tails_count += 1,
+                    }
+                }
+            }
+        }
+
+        let active_count = active_players.len();
+        let mut eliminated = 0u32;
+        let mut survivors = 0u32;
+
+        if heads_count == tails_count {
+            if active_count == 2 {
+                // Break tie for exactly 2 players: Heads survives, Tails eliminated
+                for player in active_players.iter() {
+                    if let Some(choice) = ArenaStorage::load_player_choice(&env, &player) {
+                        match choice {
+                            Choice::Tails => {
+                                ArenaStorage::set_player_active(&env, &player, false);
+                                eliminated += 1;
+                                ArenaEvents::player_eliminated(&env, &player);
+                            }
+                            Choice::Heads => {
+                                survivors += 1;
+                            }
+                        }
+                    } else {
+                        ArenaStorage::set_player_active(&env, &player, false);
+                        eliminated += 1;
+                        ArenaEvents::player_eliminated(&env, &player);
+                    }
+                }
+            } else {
+                // For >2 players, tie round has no eliminations
+                survivors = active_count;
+            }
+        } else {
+            // Minority wins rule: the side with fewer choices survives
+            let surviving_choice = if heads_count < tails_count {
+                Choice::Heads
+            } else {
+                Choice::Tails
+            };
+
+            for player in active_players.iter() {
+                if let Some(choice) = ArenaStorage::load_player_choice(&env, &player) {
+                    if choice != surviving_choice {
+                        ArenaStorage::set_player_active(&env, &player, false);
+                        eliminated += 1;
+                        ArenaEvents::player_eliminated(&env, &player);
+                    } else {
+                        survivors += 1;
+                    }
+                } else {
+                    ArenaStorage::set_player_active(&env, &player, false);
+                    eliminated += 1;
+                    ArenaEvents::player_eliminated(&env, &player);
+                }
+            }
+        }
+
+        // Clear choices for the next round
+        ArenaStorage::clear_choices(&env);
+
+        let round = ArenaStorage::get_round(&env) + 1;
+        ArenaStorage::set_round(&env, round);
+
+        // If only 1 survivor left (or 0), game finishes
+        if survivors <= 1 {
+            config.state = GameState::Finished;
+            ArenaStorage::save_config(&env, &config);
+
+            // Find and save the winner
+            for player in players.iter() {
+                if ArenaStorage::is_player_active(&env, &player) {
+                    ArenaStorage::set_winner(&env, &player);
+                    break;
+                }
+            }
+        }
+
+        Ok(RoundResult {
+            round,
+            eliminated,
+            survivors,
+        })
+    }
+
+    /// Claim the prize pool
+    pub fn claim(env: Env, winner: Address) -> Result<(), ArenaError> {
+        winner.require_auth();
+
+        let config = ArenaStorage::load_config(&env)?;
+        if config.state != GameState::Finished {
+            return Err(ArenaError::GameNotFinished);
+        }
+
+        if ArenaStorage::is_prize_claimed(&env) {
+            return Err(ArenaError::PrizeAlreadyClaimed);
+        }
+
+        let stored_winner = ArenaStorage::get_winner(&env).ok_or(ArenaError::PlayerEliminated)?;
+        if stored_winner != winner {
+            return Err(ArenaError::PlayerEliminated);
+        }
+
+        ArenaStorage::set_prize_claimed(&env);
+
+        ArenaEvents::prize_claimed(&env, &winner);
+
+        Ok(())
+    }
+
+    /// Get the winner address if the game is finished
+    pub fn winner(env: Env) -> Option<Address> {
+        ArenaStorage::get_winner(&env)
+    }
+
+    /// Get current game state directly
+    pub fn game_state(env: Env) -> GameState {
+        ArenaStorage::load_config(&env)
+            .map(|c| c.state)
+            .unwrap_or(GameState::Open)
+    }
 }
+

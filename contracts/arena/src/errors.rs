@@ -18,4 +18,13 @@ pub enum ArenaError {
     ArenaFull = 6,
     /// Join deadline has passed
     DeadlinePassed = 7,
+    /// Player has been eliminated
+    PlayerEliminated = 8,
+    /// Prize already claimed
+    PrizeAlreadyClaimed = 9,
+    /// Game not finished
+    GameNotFinished = 10,
+    /// Not a registered player
+    NotAPlayer = 11,
 }
+

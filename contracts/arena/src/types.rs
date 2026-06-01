@@ -18,3 +18,19 @@ pub struct ArenaConfig {
     pub state: GameState,
     pub player_count: u32,
 }
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Choice {
+    Heads,
+    Tails,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoundResult {
+    pub round: u32,
+    pub eliminated: u32,
+    pub survivors: u32,
+}
+

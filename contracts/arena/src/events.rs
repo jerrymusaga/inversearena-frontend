@@ -27,4 +27,20 @@ impl ArenaEvents {
     pub fn player_joined(env: &Env, player: &Address) {
         env.events().publish((symbol_short!("JOIN"),), player);
     }
+
+    /// Emit choice submitted event
+    pub fn choice_submitted(env: &Env, player: &Address) {
+        env.events().publish((symbol_short!("CHOICE"),), player);
+    }
+
+    /// Emit player eliminated event
+    pub fn player_eliminated(env: &Env, player: &Address) {
+        env.events().publish((symbol_short!("ELIM"),), player);
+    }
+
+    /// Emit prize claimed event
+    pub fn prize_claimed(env: &Env, winner: &Address) {
+        env.events().publish((symbol_short!("CLAIMED"),), winner);
+    }
 }
+
