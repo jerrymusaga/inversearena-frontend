@@ -1422,3 +1422,5 @@ mod test {
 }
 #[cfg(test)]
 mod join_arena_tests;
+#[cfg(test)]
+mod integration_tests;
