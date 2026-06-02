@@ -17,7 +17,7 @@ export const WalletProvider = ({ children }: { children: ReactNode }) => {
       publicKey: publicKey,
       error,
       network: stellarConfig.network,
-      connect: connectWallet,
+      connect: () => connectWallet().then(() => {}),
       disconnect: disconnectWallet,
     }),
     [status, publicKey, error, connectWallet, disconnectWallet]

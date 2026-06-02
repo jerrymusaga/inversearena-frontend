@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use soroban_sdk::{Address, contracterror, contracttype};
 
 /// Lifecycle state of an arena.
@@ -13,6 +12,8 @@ pub enum GameState {
     Finished,
     /// Admin cancelled before the game started; all entry fees refunded.
     Cancelled,
+    /// Prize has been distributed to the winner; arena is fully resolved.
+    Settled,
 }
 
 /// A player's coin-flip choice for a round.
@@ -39,14 +40,34 @@ impl Choice {
 pub struct ArenaConfig {
     pub admin: Address,
     pub stake_token: Address,
+    /// Address of the yield-bearing RWA vault adapter contract.
+    pub yield_vault: Address,
     pub entry_fee: i128,
     pub state: GameState,
+    /// Emergency circuit breaker. When true, state-mutating gameplay entry
+    /// points reject until the admin unpauses the arena.
+    pub paused: bool,
     /// Total number of players that have ever joined this arena. Kept in sync
     /// by `ArenaStorage::add_player` so it can be read without scanning storage.
     pub player_count: u32,
+    /// Cumulative yield accrued across all resolved rounds.
+    pub cumulative_yield: i128,
     /// Ledger timestamp (seconds) after which commitments are no longer
     /// accepted and the reveal phase begins.
     pub commit_deadline: u64,
+    /// Number of completed rounds so far. Incremented when a round resolves.
+    pub round_count: u32,
+    /// On-chain oracle contract that supplies the current USDY yield rate in
+    /// basis points. Called once per `resolve_round` to snapshot the rate.
+    /// If the oracle is unavailable the round defaults to 0 bps yield.
+    pub oracle_contract: Address,
+}
+
+/// Wrapper for a pending admin transfer proposal.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingAdmin {
+    pub new_admin: Address,
 }
 
 /// Per-player state stored in persistent storage, keyed by the player address.
@@ -63,6 +84,25 @@ pub struct PlayerState {
     pub rounds_survived: u32,
 }
 
+/// Per-round resolution metadata stored in persistent storage.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoundResult {
+    pub round: u32,
+    pub eliminated: u32,
+    pub survivors: u32,
+    pub yield_snapshot: YieldSnapshot,
+}
+
+/// Per-round yield snapshot stored in persistent storage, keyed by round number.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct YieldSnapshot {
+    pub round: u32,
+    pub rate_bps: u32,
+    pub accrued: i128,
+}
+
 /// Error codes returned by arena contract functions.
 ///
 /// Must use `#[contracterror]` (not `#[contracttype]`) so the Soroban macro
@@ -71,28 +111,76 @@ pub struct PlayerState {
 #[contracterror]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArenaError {
-    /// Caller is not authorised to perform this operation.
+    /// Returned when a caller attempts to perform an operation they are not authorized to perform.
+    ///
+    /// Note that most standard authorization checks are handled automatically by Soroban's
+    /// `require_auth` mechanism, which panics rather than returning a Rust error.
     Unauthorized = 1,
-    /// Operation requires the arena to be in Open state.
+
+    /// Deprecated: Use `InvalidGameState` instead.
+    #[deprecated(note = "Use `InvalidGameState` instead")]
     CannotCancelStartedGame = 2,
-    /// Arena configuration has not been initialised.
+
+    /// Deprecated: Use `NotInitialized` instead.
+    #[deprecated(note = "Use `NotInitialized` instead")]
     NotInitialised = 3,
-    /// Commit phase has ended — the current ledger timestamp is past the
-    /// configured `commit_deadline`.
-    CommitPhaseEnded = 4,
-    /// Reveal phase is not yet active — the commit deadline has not passed.
-    RevealPhaseNotActive = 5,
-    /// The computed hash of (choice | salt) does not match the stored
-    /// commitment for this player.
-    HashMismatch = 6,
-    /// The player has already revealed their choice for this round.
-    AlreadyRevealed = 7,
-    /// No prior commitment was found for this player.
-    NoCommitmentFound = 8,
-    /// `resolve_round` was called before the round was started.
-    RoundNotStarted = 9,
-    /// `resolve_round` was called before the minimum grace period elapsed.
-    GracePeriodNotElapsed = 10,
-    /// The operation requires the arena to be in the Active state.
-    RoundNotActive = 11,
+
+    /// Returned when a player attempts to reveal their choice before the commitment phase has ended
+    /// (i.e. before the `commit_deadline` has passed), or when the admin attempts to resolve a round
+    /// when the arena is not in the `Active` state.
+    RoundNotActive = 4,
+
+    /// Returned during round resolution when no round start timestamp is recorded in storage.
+    RoundNotStarted = 5,
+
+    /// Returned when trying to resolve a round before the grace period (round duration) has elapsed.
+    GracePeriodNotElapsed = 6,
+
+    /// Returned when a player's revealed choice and salt do not match the cryptographic commitment
+    /// they previously submitted.
+    InvalidReveal = 7,
+
+    /// Returned when a player attempts to reveal their choice, but they have not submitted a
+    /// commitment for the current round.
+    MissingCommitment = 8,
+
+    /// Returned when a player attempts to reveal their choice, but they have already successfully
+    /// revealed their choice for the current round.
+    ChoiceAlreadyRevealed = 9,
+
+    /// Returned when a caller attempts to call `initialize` on an arena contract that has
+    /// already been initialized.
+    AlreadyInitialized = 10,
+
+    /// Returned when a player attempts to claim the prize, but the arena is not in the `Finished` state.
+    GameNotFinished = 11,
+
+    /// Returned when a player attempts to claim a prize they have already claimed, or when a payout
+    /// has already been executed for this game.
+    PrizeAlreadyClaimed = 12,
+
+    /// Returned when an eliminated player attempts to claim the prize or perform an action reserved for
+    /// surviving players.
+    PlayerEliminated = 13,
+
+    /// Returned when a caller attempts to accept the admin role, but there is no pending admin
+    /// transfer proposal recorded.
+    NoPendingAdmin = 14,
+
+    /// Returned when the vault address provided during initialization is invalid (e.g. not a contract
+    /// or not responding to the required interface).
+    InvalidVaultAddress = 15,
+
+    /// Returned when a state-mutating gameplay entry point is called while the contract is paused
+    /// by the admin (emergency circuit breaker).
+    ContractPaused = 16,
+
+    /// Returned when the arena is in an invalid lifecycle state for the requested operation.
+    ///
+    /// Examples include attempting to join or cancel an arena that is already in progress/finished,
+    /// or starting a round when the game is not in a valid state.
+    InvalidGameState = 17,
+
+    /// Returned when an operation is performed on an arena that has not yet been initialized.
+    NotInitialized = 18,
 }

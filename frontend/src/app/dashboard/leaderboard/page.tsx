@@ -277,7 +277,7 @@ export default function LeaderboardPage() {
       <PoolCreationModal
         isOpen={isChallengeModalOpen}
         onClose={() => setIsChallengeModalOpen(false)}
-        challengedSurvivor={targetedSurvivor}
+        {...(targetedSurvivor !== undefined && { challengedSurvivor: targetedSurvivor })}
       />
     </div>
   );

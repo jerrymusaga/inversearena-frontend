@@ -1,17 +1,18 @@
-use soroban_sdk::{Address, Env, contracttype, symbol_short};
-
-const ADMIN_KEY: soroban_sdk::Symbol = symbol_short!("ADMIN");
-const STAKE_TOKEN_KEY: soroban_sdk::Symbol = symbol_short!("STK_TKN");
-const MIN_CREATOR_STAKE_KEY: soroban_sdk::Symbol = symbol_short!("MIN_STK");
-const NEXT_ARENA_ID_KEY: soroban_sdk::Symbol = symbol_short!("NEXT_ID");
+use crate::types::FactoryError;
+use soroban_sdk::{Address, BytesN, Env, contracttype};
 
 #[contracttype]
 pub enum DataKey {
     CreatorStake(Address),
+    Admin,
+    MinStake,
+    ArenaWasmHash,
+    PoolSequence,
+    Whitelisted(Address),
 }
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct CreatorStakeRecord {
     pub creator: Address,
     pub amount: i128,
@@ -21,66 +22,81 @@ pub struct FactoryStorage;
 
 impl FactoryStorage {
     pub fn has_admin(env: &Env) -> bool {
-        env.storage().instance().has(&ADMIN_KEY)
-    }
-
-    pub fn load_admin(env: &Env) -> Option<Address> {
-        env.storage().instance().get(&ADMIN_KEY)
+        env.storage().persistent().has(&DataKey::Admin)
     }
 
     pub fn save_admin(env: &Env, admin: &Address) {
-        env.storage().instance().set(&ADMIN_KEY, admin);
+        env.storage().persistent().set(&DataKey::Admin, admin);
     }
 
-    pub fn load_stake_token(env: &Env) -> Option<Address> {
-        env.storage().instance().get(&STAKE_TOKEN_KEY)
-    }
-
-    pub fn save_stake_token(env: &Env, token: &Address) {
-        env.storage().instance().set(&STAKE_TOKEN_KEY, token);
-    }
-
-    pub fn load_min_creator_stake(env: &Env) -> i128 {
+    pub fn load_admin(env: &Env) -> Result<Address, FactoryError> {
         env.storage()
-            .instance()
-            .get(&MIN_CREATOR_STAKE_KEY)
-            .unwrap_or(0)
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(FactoryError::NotInitialized)
     }
 
-    pub fn save_min_creator_stake(env: &Env, stake: i128) {
-        env.storage().instance().set(&MIN_CREATOR_STAKE_KEY, &stake);
+    pub fn save_min_stake(env: &Env, min_stake: i128) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::MinStake, &min_stake);
     }
 
-    pub fn next_arena_nonce(env: &Env) -> u64 {
-        let next = env.storage().instance().get(&NEXT_ARENA_ID_KEY).unwrap_or(0u64);
-        env.storage().instance().set(&NEXT_ARENA_ID_KEY, &(next + 1));
+    pub fn load_min_stake(env: &Env) -> Result<i128, FactoryError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MinStake)
+            .ok_or(FactoryError::NotInitialized)
+    }
+
+    pub fn set_whitelisted(env: &Env, host: &Address, whitelisted: bool) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Whitelisted(host.clone()), &whitelisted);
+    }
+
+    pub fn is_whitelisted(env: &Env, host: &Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Whitelisted(host.clone()))
+            .unwrap_or(false)
+    }
+
+    pub fn save_arena_wasm_hash(env: &Env, wasm_hash: &BytesN<32>) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::ArenaWasmHash, wasm_hash);
+    }
+
+    pub fn load_arena_wasm_hash(env: &Env) -> Result<BytesN<32>, FactoryError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ArenaWasmHash)
+            .ok_or(FactoryError::WasmHashNotSet)
+    }
+
+    pub fn next_pool_id(env: &Env) -> u32 {
+        let next = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PoolSequence)
+            .unwrap_or(0u32)
+            .saturating_add(1);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PoolSequence, &next);
         next
     }
 
-    pub fn save_creator_stake(
-        env: &Env,
-        arena_id: &Address,
-        creator: &Address,
-        amount: i128,
-    ) {
-        env.storage().persistent().set(
-            &DataKey::CreatorStake(arena_id.clone()),
-            &CreatorStakeRecord {
-                creator: creator.clone(),
-                amount,
-            },
-        );
-    }
-
-    pub fn load_creator_stake(env: &Env, arena_id: &Address) -> Option<CreatorStakeRecord> {
+    pub fn save_creator_stake(env: &Env, arena: &Address, record: &CreatorStakeRecord) {
         env.storage()
             .persistent()
-            .get(&DataKey::CreatorStake(arena_id.clone()))
+            .set(&DataKey::CreatorStake(arena.clone()), record);
     }
 
-    pub fn remove_creator_stake(env: &Env, arena_id: &Address) {
+    pub fn load_creator_stake(env: &Env, arena: &Address) -> Option<CreatorStakeRecord> {
         env.storage()
             .persistent()
-            .remove(&DataKey::CreatorStake(arena_id.clone()));
+            .get(&DataKey::CreatorStake(arena.clone()))
     }
 }

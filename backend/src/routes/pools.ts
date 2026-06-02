@@ -4,8 +4,9 @@ import { asyncHandler } from "../middleware/validate";
 import { cacheMiddleware } from "../middleware/cache";
 import { cacheTTL } from "../cache/cacheService";
 import { prisma } from "../db/prisma";
-import { createRateLimitMiddleware, poolsRateLimitConfig } from "../middleware/rateLimit";
+import { createRateLimitMiddleware, getPoolsRateLimitConfig } from "../middleware/rateLimit";
 import type { RequestHandler } from "express";
+import { apiError } from "../utils/apiError";
 
 const PaginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(25),
@@ -51,7 +52,7 @@ function formatEliminationLog(log: {
 export function createPoolsRouter(authMiddleware: RequestHandler): Router {
   const router = Router();
 
-  const poolsRateLimiter = createRateLimitMiddleware(poolsRateLimitConfig);
+  const poolsRateLimiter = createRateLimitMiddleware(getPoolsRateLimitConfig());
 
   /**
    * POST /api/pools
@@ -103,6 +104,9 @@ export function createPoolsRouter(authMiddleware: RequestHandler): Router {
     ),
     asyncHandler(async (req, res) => {
       const { id } = req.params;
+      if (!id) {
+        throw apiError(400, "MISSING_POOL_ID", "Pool ID is required");
+      }
       const { limit, cursor } = PaginationSchema.parse(req.query);
 
       const pool = await prisma.pool.findUnique({
@@ -111,8 +115,7 @@ export function createPoolsRouter(authMiddleware: RequestHandler): Router {
       });
 
       if (!pool) {
-        res.status(404).json({ error: { code: "POOL_NOT_FOUND" } });
-        return;
+        throw apiError(404, "POOL_NOT_FOUND", "Pool not found");
       }
 
       const offset = cursor ? decodeCursor(cursor) : 0;

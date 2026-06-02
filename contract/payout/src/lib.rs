@@ -1,10 +1,14 @@
 #![no_std]
+mod snapshot_tests;
 mod storage;
 mod types;
 
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Vec};
+use soroban_sdk::{Address, Env, Vec, contract, contractimpl, symbol_short, token};
 use storage::PayoutStorage;
 use types::PayoutError;
+
+/// Maximum recipients per `distribute_batch` call (Soroban compute budget guard).
+pub const MAX_BATCH_SIZE: u32 = 50;
 
 /// Payout contract — distributes winnings to the surviving player(s) of an
 /// arena (#660).
@@ -53,6 +57,11 @@ impl PayoutContract {
 
         let token_addr = PayoutStorage::get_token(&env)?;
         let client = token::TokenClient::new(&env, &token_addr);
+        // Ensure contract has sufficient balance for the payout
+        let contract_balance = client.balance(&env.current_contract_address());
+        if amount > contract_balance {
+            return Err(PayoutError::InsufficientBalance);
+        }
         client.transfer(&env.current_contract_address(), &winner, &amount);
 
         env.events()
@@ -62,6 +71,7 @@ impl PayoutContract {
 
     /// Multi-recipient batch payout in a single transaction. All amounts are
     /// validated before any transfer, and the batch is idempotent on `payout_id`.
+    /// Duplicate recipient addresses are rejected to prevent double-payment.
     pub fn distribute_batch(
         env: Env,
         payout_id: u64,
@@ -73,25 +83,40 @@ impl PayoutContract {
         if recipients.is_empty() {
             return Err(PayoutError::EmptyBatch);
         }
-        for (_, amount) in recipients.iter() {
+        if recipients.len() > MAX_BATCH_SIZE {
+            return Err(PayoutError::BatchTooLarge);
+        }
+        let mut seen: Vec<Address> = Vec::new(&env);
+        let mut total_amount: i128 = 0;
+        for (recipient, amount) in recipients.iter() {
             if amount <= 0 {
                 return Err(PayoutError::InvalidAmount);
             }
+            if seen.contains(&recipient) {
+                return Err(PayoutError::DuplicateRecipient);
+            }
+            seen.push_back(recipient);
+            total_amount = total_amount.saturating_add(amount);
+        }
+        // Verify contract has enough balance for total payout
+        let token_addr = PayoutStorage::get_token(&env)?;
+        let client = token::TokenClient::new(&env, &token_addr);
+        let contract_balance = client.balance(&env.current_contract_address());
+        if total_amount > contract_balance {
+            return Err(PayoutError::InsufficientBalance);
         }
         if PayoutStorage::is_paid(&env, payout_id) {
             return Err(PayoutError::AlreadyPaid);
         }
 
-        PayoutStorage::mark_paid(&env, payout_id);
-
-        let token_addr = PayoutStorage::get_token(&env)?;
-        let client = token::TokenClient::new(&env, &token_addr);
         let contract = env.current_contract_address();
         for (recipient, amount) in recipients.iter() {
             client.transfer(&contract, &recipient, &amount);
             env.events()
                 .publish((symbol_short!("payout"), recipient), (payout_id, amount));
         }
+
+        PayoutStorage::mark_paid(&env, payout_id);
         Ok(())
     }
 
@@ -193,6 +218,42 @@ mod test {
         let fx = setup(1_000);
         let recipients: Vec<(Address, i128)> = Vec::new(&fx.env);
         assert!(fx.client.try_distribute_batch(&1, &recipients).is_err());
+    }
+
+    #[test]
+    fn distribute_batch_rejects_duplicate_recipients() {
+        let fx = setup(1_000);
+        let a = Address::generate(&fx.env);
+
+        let mut recipients = Vec::new(&fx.env);
+        recipients.push_back((a.clone(), 200i128));
+        recipients.push_back((a.clone(), 300i128));
+        let err = fx.client.try_distribute_batch(&1, &recipients);
+        assert!(err.is_err());
+        // Recipient should not have received any payment.
+        assert_eq!(fx.token.balance(&a), 0);
+    }
+
+    #[test]
+    fn rejects_oversized_batch() {
+        let fx = setup(100_000);
+        let mut recipients = Vec::new(&fx.env);
+        for _ in 0..(MAX_BATCH_SIZE + 1) {
+            recipients.push_back((Address::generate(&fx.env), 1i128));
+        }
+        assert!(fx.client.try_distribute_batch(&99, &recipients).is_err());
+        assert!(!fx.client.is_paid(&99));
+    }
+
+    #[test]
+    fn max_size_batch_succeeds() {
+        let fx = setup(100_000);
+        let mut recipients = Vec::new(&fx.env);
+        for _ in 0..MAX_BATCH_SIZE {
+            recipients.push_back((Address::generate(&fx.env), 1i128));
+        }
+        fx.client.distribute_batch(&100, &recipients);
+        assert!(fx.client.is_paid(&100));
     }
 
     #[test]

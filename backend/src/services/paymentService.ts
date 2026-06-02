@@ -1,4 +1,5 @@
 import {
+  Account,
   Address,
   BASE_FEE,
   Contract,
@@ -17,6 +18,7 @@ import { z } from "zod";
 import { getPaymentConfig, type PaymentConfig } from "../config/paymentConfig";
 import type { TransactionRepository } from "../repositories/transactionRepository";
 import { payoutsSuccessTotal } from "../utils/metrics";
+import { CircuitOpenError, getSorobanBreaker, type CircuitBreaker } from "../utils/circuitBreaker";
 import type {
   BuildPayoutResult,
   CreatePayoutRequest,
@@ -26,7 +28,7 @@ import type {
 
 const PUBLIC_KEY_REGEX = /^G[A-Z2-7]{55}$/;
 const IDEMPOTENCY_REGEX = /^[a-zA-Z0-9:_-]{8,128}$/;
-const AMOUNT_REGEX = /^\d+(\.\d{1,7})?$/;
+const AMOUNT_REGEX = /^\d+(\.\d{0,7})?$/;
 
 const CreatePayoutRequestSchema = z.object({
   payoutId: z.string().trim().min(1).max(128),
@@ -45,7 +47,7 @@ const CreatePayoutRequestSchema = z.object({
     .regex(IDEMPOTENCY_REGEX, "Invalid idempotency key format"),
 });
 
-function toStroops(amount: string): string {
+export function toStroops(amount: string): string {
   const [wholePart, fractionPart = ""] = amount.split(".");
   const padded = (fractionPart + "0000000").slice(0, 7);
   const combined = `${wholePart}${padded}`.replace(/^0+(?=\d)/, "");
@@ -77,11 +79,13 @@ const delay = async (ms: number): Promise<void> =>
 export interface PaymentServiceOptions {
   config?: PaymentConfig;
   rpcServer?: any;
+  circuitBreaker?: CircuitBreaker;
 }
 
 export class PaymentService {
   private readonly config: PaymentConfig;
   private readonly rpcServer: any;
+  private readonly breaker: CircuitBreaker;
 
   constructor(
     private readonly transactions: TransactionRepository,
@@ -89,6 +93,11 @@ export class PaymentService {
   ) {
     this.config = options.config ?? getPaymentConfig();
     this.rpcServer = options.rpcServer ?? new Server(this.config.sorobanRpcUrl);
+    this.breaker = options.circuitBreaker ?? getSorobanBreaker();
+  }
+
+  getSorobanBreakerStats() {
+    return this.breaker.getStats();
   }
 
   async createPayoutTransaction(input: unknown): Promise<BuildPayoutResult> {
@@ -209,7 +218,18 @@ export class PaymentService {
         transaction.signedXdr,
         this.config.networkPassphrase
       );
-      const sendResult = await this.rpcServer.sendTransaction(signedTransaction);
+
+      let sendResult: Awaited<ReturnType<typeof this.rpcServer.sendTransaction>>;
+      try {
+        sendResult = await this.breaker.fire(() =>
+          this.rpcServer.sendTransaction(signedTransaction)
+        );
+      } catch (err) {
+        if (err instanceof CircuitOpenError) {
+          return { transaction, submitted: false };
+        }
+        throw err;
+      }
 
       if (sendResult.status === "ERROR") {
         const failed = await this.transactions.update(transaction.id, {
@@ -258,7 +278,17 @@ export class PaymentService {
       return transaction;
     }
 
-    const onChain = await this.rpcServer.getTransaction(transaction.txHash);
+    let onChain: Awaited<ReturnType<typeof this.rpcServer.getTransaction>>;
+    try {
+      onChain = await this.breaker.fire(() =>
+        this.rpcServer.getTransaction(transaction.txHash)
+      );
+    } catch (err) {
+      if (err instanceof CircuitOpenError) {
+        return transaction;
+      }
+      throw err;
+    }
 
     if (onChain.status === Api.GetTransactionStatus.SUCCESS) {
       payoutsSuccessTotal.inc({ asset: transaction.asset });
@@ -345,11 +375,11 @@ export class PaymentService {
     }
 
     const args = invoke.args();
-    const destination = String(scValToNative(args[0]));
+    const destination = String(scValToNative(args[0]!));
     if (destination !== transaction.destinationAccount) {
       throw new Error("Signed transaction destination does not match the payout record");
     }
-    const amount = String(scValToNative(args[1]));
+    const amount = String(scValToNative(args[1]!));
     if (amount !== transaction.amountStroops) {
       throw new Error("Signed transaction amount does not match the payout record");
     }
@@ -364,7 +394,9 @@ export class PaymentService {
   }
 
   private async buildPreparedTransaction(request: CreatePayoutRequest, nonce: number) {
-    const sourceAccount = await this.rpcServer.getAccount(this.config.sourceAccount);
+    const sourceAccount = await this.breaker.fire(() =>
+      this.rpcServer.getAccount(this.config.sourceAccount)
+    ) as Account;
     const contract = new Contract(this.config.payoutContractId);
     const amountStroops = toStroops(request.amount);
 
@@ -385,7 +417,9 @@ export class PaymentService {
       .setTimeout(60)
       .build();
 
-    const preparedTransaction = await this.rpcServer.prepareTransaction(built);
+    const preparedTransaction = await this.breaker.fire(() =>
+      this.rpcServer.prepareTransaction(built)
+    ) as Transaction;
 
     const feeStroops = Number(preparedTransaction.fee);
     if (!Number.isFinite(feeStroops) || feeStroops <= 0) {

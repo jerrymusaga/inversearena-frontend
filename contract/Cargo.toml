@@ -3,9 +3,11 @@ resolver = "2"
 members = [
     "arena",
     "factory",
+    "oracle",
     "payout",
     "rwa-adapter",
     "staking",
+    "rwa-adapter",
 ]
 
 [workspace.dependencies]
