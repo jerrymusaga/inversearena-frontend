@@ -5,12 +5,13 @@ import type { RoundInput } from '../types/round';
 import { apiError } from '../utils/apiError';
 
 export class RoundController {
-  constructor(private roundService: RoundService) {}
+  constructor(private roundService: RoundService) { }
 
   resolveRound = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const input = RoundInputSchema.parse(req.body) as RoundInput;
 
     try {
+
       const resolution = await this.roundService.resolveRound(input);
       res.json({
         success: true,

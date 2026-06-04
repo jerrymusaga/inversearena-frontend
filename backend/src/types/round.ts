@@ -29,6 +29,7 @@ export interface PlayerChoice {
 export interface RoundInput {
   roundId: string;
   playerChoices: PlayerChoice[];
+  allActivePlayerIds: string[];
   oracleYield: number;
   randomSeed?: string;
 }

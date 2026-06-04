@@ -5,6 +5,7 @@ members = [
     "factory",
     "oracle",
     "payout",
+    "rwa-adapter",
     "staking",
     "rwa-adapter",
 ]
