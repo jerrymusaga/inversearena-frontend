@@ -1,25 +1,20 @@
-const setTag = jest.fn();
-const setExtras = jest.fn();
-const captureException = jest.fn();
-
-jest.mock("@sentry/node", () => ({
-  withScope: (fn: (scope: { setTag: jest.Mock; setExtras: jest.Mock }) => void) => {
-    fn({ setTag, setExtras });
-  },
-  captureException: (...args: unknown[]) => captureException(...args),
-}));
-
 import { runWithRequestContext, getRequestId } from "../src/utils/requestContext";
 import { reportErrorToSentry } from "../src/utils/logger";
 
-afterAll(() => {
-  jest.restoreAllMocks();
-});
+const mockScope = { setTag: jest.fn(), setExtras: jest.fn() };
+
+jest.mock("@sentry/node", () => ({
+  withScope: jest.fn((fn: (scope: typeof mockScope) => void) => fn(mockScope)),
+  captureException: jest.fn(),
+}));
 
 describe("request context propagation (#661)", () => {
   beforeEach(() => {
-    setTag.mockClear();
-    captureException.mockClear();
+    mockScope.setTag.mockClear();
+    mockScope.setExtras.mockClear();
+    const Sentry = require("@sentry/node");
+    Sentry.withScope.mockClear();
+    Sentry.captureException.mockClear();
   });
 
   it("has no request id outside a request scope", () => {
@@ -32,7 +27,6 @@ describe("request context propagation (#661)", () => {
       await Promise.resolve();
       expect(getRequestId()).toBe("req-123");
     });
-    // ...and clears once the scope exits.
     expect(getRequestId()).toBeUndefined();
   });
 
@@ -40,12 +34,13 @@ describe("request context propagation (#661)", () => {
     runWithRequestContext({ requestId: "req-abc" }, () => {
       reportErrorToSentry(new Error("boom"));
     });
-    expect(setTag).toHaveBeenCalledWith("requestId", "req-abc");
-    expect(captureException).toHaveBeenCalledTimes(1);
+    expect(mockScope.setTag).toHaveBeenCalledWith("requestId", "req-abc");
+    const Sentry = require("@sentry/node");
+    expect(Sentry.captureException).toHaveBeenCalledTimes(1);
   });
 
   it("does not tag a request id when there is no active context", () => {
     reportErrorToSentry(new Error("boom"));
-    expect(setTag).not.toHaveBeenCalledWith("requestId", expect.anything());
+    expect(mockScope.setTag).not.toHaveBeenCalledWith("requestId", expect.anything());
   });
 });

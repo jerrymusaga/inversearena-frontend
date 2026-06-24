@@ -122,5 +122,33 @@ impl ArenaStorage {
         let key = (Symbol::short("REFUND"), player.clone());
         env.storage().instance().set(&key, &true);
     }
+
+    /// Clean up transient arena data (player lists, choices, round data, etc.)
+    /// while preserving the ArenaConfig for historical reference.
+    pub fn cleanup_arena_data(env: &Env) {
+        // Remove all player-related data
+        let players = Self::load_all_players(env);
+        for player in players.iter() {
+            // Remove player choice
+            let choice_key = (Symbol::short("CHOICE"), player.clone());
+            env.storage().instance().remove(&choice_key);
+            // Remove player active status
+            env.storage().instance().remove(&player);
+            // Remove refund claimed status
+            let refund_key = (Symbol::short("REFUND"), player.clone());
+            env.storage().instance().remove(&refund_key);
+        }
+
+        // Remove player list
+        env.storage().instance().remove(&PLAYERS_KEY);
+        // Remove winner
+        env.storage().instance().remove(&WINNER_KEY);
+        // Remove round number
+        env.storage().instance().remove(&ROUND_KEY);
+        // Remove prize claimed flag
+        env.storage().instance().remove(&PRIZE_CLAIMED_KEY);
+        // Remove creator stake
+        env.storage().instance().remove(&CREATOR_STAKE_KEY);
+    }
 }
 

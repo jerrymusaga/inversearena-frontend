@@ -95,6 +95,11 @@ export class RoundService {
     const headCount = playerChoices.filter(p => p.choice === 'heads').length;
     const tailCount = playerChoices.filter(p => p.choice === 'tails').length;
 
+    // A single remaining player survives automatically
+    if (headCount + tailCount === 1 && allActivePlayerIds.length === 1) {
+      return [];
+    }
+
     if (headCount === tailCount) {
       return allActivePlayerIds.filter(
         id => !playerChoices.some(p => p.userId === id)

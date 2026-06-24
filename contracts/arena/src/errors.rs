@@ -51,5 +51,7 @@ pub enum ArenaError {
     /// Stake amount must be positive
     InvalidStakeAmount = 17,
     ContractPaused = 20,
+    /// Arena is not in a terminal state (Finished or Cancelled) for cleanup
+    ArenaNotFinished = 21,
 }
 
