@@ -186,7 +186,15 @@ pub enum ArenaError {
     /// Prevents degenerate single-player or zero-player games where one player can win trivially.
     NotEnoughPlayers = 19,
 
-    /// Returned when a guarded state-changing entry point is called again before
-    /// its previous invocation has cleared the temporary reentrancy guard.
-    ReentrantCall = 20,
+    /// Returned when a banned player attempts to join a new arena.
+    PlayerBanned = 20,
+
+    /// Returned when the arena creator/admin attempts to join their own arena.
+    CreatorCannotJoin = 21,
+
+    /// Returned when a player attempts to join after the arena has reached capacity.
+    ArenaFull = 22,
+
+    /// Returned when configured player limits are invalid.
+    InvalidPlayerLimits = 23,
 }
