@@ -271,7 +271,8 @@ impl ArenaContract {
         player.require_auth();
         let config = ArenaStorage::load_config(&env)?;
         Self::require_not_paused(&config)?;
-        let player_state = ArenaStorage::load_player(&env, &player).ok_or(ArenaError::NotAPlayer)?;
+        let player_state =
+            ArenaStorage::load_player(&env, &player).ok_or(ArenaError::NotAPlayer)?;
         if !player_state.active {
             return Err(ArenaError::PlayerEliminated);
         }
@@ -1945,7 +1946,8 @@ mod test {
         let vault_id = env.register(MockVault, ());
 
         let admin = Address::generate(&env);
-        let token = env.register_stellar_asset_contract(admin.clone());
+        let sac = env.register_stellar_asset_contract_v2(admin.clone());
+        let token = sac.address();
         let token_client = token::TokenClient::new(&env, &token);
         let token_admin = StellarAssetClient::new(&env, &token);
 
