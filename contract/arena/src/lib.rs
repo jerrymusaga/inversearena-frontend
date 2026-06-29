@@ -983,39 +983,41 @@ impl ArenaContract {
 
 fn build_leaderboard(env: &Env) {
     let players = ArenaStorage::load_all_players(env);
-    let mut entries = Vec::new(env);
+    let limit = ArenaStorage::load_leaderboard_limit(env);
+    let n = players.len();
+
+    // Collect all player entries into an unsorted working Vec.
+    let mut entries: Vec<LeaderboardEntry> = Vec::new(env);
     for player in players.iter() {
         let state = ArenaStorage::load_player(env, &player).unwrap_or_default();
-        let entry = LeaderboardEntry {
-            player: player.clone(),
+        entries.push_back(LeaderboardEntry {
+            player,
             rounds_survived: state.rounds_survived,
-        };
-
-        let mut inserted = false;
-        for i in 0..entries.len() {
-            let existing: LeaderboardEntry = entries.get(i).unwrap();
-            if entry.rounds_survived > existing.rounds_survived {
-                entries.insert(i, entry.clone());
-                inserted = true;
-                break;
-            }
-        }
-        if !inserted {
-            entries.push_back(entry);
-        }
+        });
     }
 
-    let limit = ArenaStorage::load_leaderboard_limit(env);
-    let mut truncated = Vec::new(env);
-    for i in 0..entries.len() {
-        if i >= limit {
+    // Partial selection sort: K = min(limit, n) passes, each a single linear scan.
+    // Total work O(K·n) — O(n) for a bounded limit — versus O(n²) for insertion sort.
+    let k = limit.min(n);
+    let mut leaderboard: Vec<LeaderboardEntry> = Vec::new(env);
+    for _ in 0..k {
+        if entries.is_empty() {
             break;
         }
-        let entry: LeaderboardEntry = entries.get(i).unwrap();
-        truncated.push_back(entry);
+        let mut best_i = 0u32;
+        let mut best_rs = entries.get(0).unwrap().rounds_survived;
+        for j in 1..entries.len() {
+            let rs = entries.get(j).unwrap().rounds_survived;
+            if rs > best_rs {
+                best_rs = rs;
+                best_i = j;
+            }
+        }
+        leaderboard.push_back(entries.get(best_i).unwrap());
+        entries.remove(best_i);
     }
 
-    ArenaStorage::save_leaderboard(env, &truncated);
+    ArenaStorage::save_leaderboard(env, &leaderboard);
     ArenaEvents::leaderboard_updated(env);
 }
 
@@ -1196,7 +1198,7 @@ mod test {
                 oracle_contract: Address::generate(&env),
             };
             ArenaStorage::save_config(&env, &config);
-            ArenaStorage::save_commitment(&env, &player, &commitment);
+            ArenaStorage::save_commitment(&env, &player, 1, &commitment);
         });
 
         let client = ArenaContractClient::new(&env, &contract_id);
@@ -1238,7 +1240,7 @@ mod test {
                     rounds_survived: 1,
                 },
             );
-            ArenaStorage::save_commitment(&env, &player, &commitment);
+            ArenaStorage::save_commitment(&env, &player, 1, &commitment);
         });
 
         let client = ArenaContractClient::new(&env, &contract_id);
@@ -1271,7 +1273,7 @@ mod test {
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::add_player(&env, &player);
-            ArenaStorage::save_commitment(&env, &player, &commitment);
+            ArenaStorage::save_commitment(&env, &player, 1, &commitment);
         });
 
         let client = ArenaContractClient::new(&env, &contract_id);
@@ -1304,7 +1306,7 @@ mod test {
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::add_player(&env, &player);
-            ArenaStorage::save_commitment(&env, &player, &commitment);
+            ArenaStorage::save_commitment(&env, &player, 1, &commitment);
         });
 
         let client = ArenaContractClient::new(&env, &contract_id);
@@ -1338,7 +1340,7 @@ mod test {
             };
             ArenaStorage::save_config(&env, &config);
             ArenaStorage::add_player(&env, &player);
-            ArenaStorage::save_commitment(&env, &player, &commitment);
+            ArenaStorage::save_commitment(&env, &player, 1, &commitment);
         });
 
         let client = ArenaContractClient::new(&env, &contract_id);
@@ -1457,7 +1459,7 @@ mod test {
                     rounds_survived: 0,
                 },
             );
-            ArenaStorage::save_commitment(&env, &player, &commitment);
+            ArenaStorage::save_commitment(&env, &player, 1, &commitment);
             ArenaStorage::save_round_start(&env, 0);
             ArenaStorage::save_round_duration(&env, 0);
         });
@@ -2706,6 +2708,74 @@ mod test {
             assert!(
                 ArenaStorage::load_commitment(&env, &p2, 1).is_none(),
                 "commitment should be cleared after resolve_round"
+            );
+        });
+    }
+
+    #[test]
+    fn leaderboard_with_120_players_is_sorted_and_capped() {
+        const N: u32 = 120;
+        const LIMIT: u32 = 50;
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let oracle_id = env.register(MockOracle, ());
+
+        env.as_contract(&contract_id, || {
+            ArenaStorage::save_config(
+                &env,
+                &ArenaConfig {
+                    admin: Address::generate(&env),
+                    stake_token: Address::generate(&env),
+                    yield_vault: Address::generate(&env),
+                    entry_fee: 100,
+                    state: GameState::Open,
+                    paused: false,
+                    player_count: 0,
+                    cumulative_yield: 0,
+                    commit_deadline: 0,
+                    round_count: 0,
+                    oracle_contract: oracle_id,
+                },
+            );
+            ArenaStorage::save_leaderboard_limit(&env, LIMIT);
+
+            // Player i gets rounds_survived = i, so player N-1 has the highest score.
+            for i in 0..N {
+                let player = Address::generate(&env);
+                ArenaStorage::add_player(&env, &player);
+                ArenaStorage::save_player(
+                    &env,
+                    &player,
+                    &PlayerState {
+                        active: true,
+                        rounds_survived: i,
+                    },
+                );
+            }
+
+            build_leaderboard(&env);
+
+            let board = ArenaStorage::load_leaderboard(&env);
+            assert_eq!(board.len(), LIMIT, "leaderboard must be capped at limit");
+
+            // Entries must be in strictly descending order of rounds_survived.
+            let mut prev_rs = u32::MAX;
+            for idx in 0..LIMIT {
+                let entry: LeaderboardEntry = board.get(idx).unwrap();
+                assert!(
+                    entry.rounds_survived <= prev_rs,
+                    "leaderboard not sorted descending at index {idx}"
+                );
+                prev_rs = entry.rounds_survived;
+            }
+
+            // Top entry must have the maximum rounds_survived.
+            assert_eq!(
+                board.get(0).unwrap().rounds_survived,
+                N - 1,
+                "first entry must have the highest rounds_survived"
             );
         });
     }
